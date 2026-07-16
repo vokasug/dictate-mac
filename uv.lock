@@ -171,7 +171,7 @@ nvtx = [
 
 [[package]]
 name = "dictate-mac"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },
@@ -180,6 +180,7 @@ dependencies = [
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "pyobjc-framework-quartz" },
+    { name = "requests" },
     { name = "rumps" },
     { name = "silero-vad" },
     { name = "sounddevice" },
@@ -198,6 +199,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "onnxruntime", specifier = ">=1.17" },
     { name = "pyobjc-framework-quartz", specifier = ">=10.2" },
+    { name = "requests", specifier = ">=2.31" },
     { name = "rumps", specifier = ">=0.4.0" },
     { name = "silero-vad", specifier = ">=5.1" },
     { name = "sounddevice", specifier = ">=0.4.6" },

@@ -26,6 +26,12 @@ from pathlib import Path
 from typing import Sequence
 
 from dictate_mac import __version__
+from dictate_mac.config import (
+    MODEL_KINDS,
+    MODEL_KIND_API,
+    MODEL_KIND_LOCAL,
+    normalize_endpoint,
+)
 from dictate_mac.logutils import (
     DEFAULT_LOG_LEVEL,
     LOG_FORMAT,
@@ -74,6 +80,53 @@ def _build_parser() -> argparse.ArgumentParser:
             "'auto'. The CLI does not consult or write the persisted "
             "config file — use the menu bar entry point (default "
             "dictate-mac invocation) for that."
+        ),
+    )
+    common.add_argument(
+        "--model-kind",
+        dest="model_kind",
+        choices=MODEL_KINDS,
+        default=MODEL_KIND_LOCAL,
+        help=(
+            "ASR backend. 'local' (default) runs mlx-whisper "
+            "in-process. 'api' POSTs 16 kHz mono WAVs to a "
+            "OpenAI-compatible endpoint; requires --api-endpoint, "
+            "--api-key and --model-id. The CLI does NOT verify the "
+            "endpoint at startup — failures surface in the log on "
+            "the first recording, exactly like with the local "
+            "backend."
+        ),
+    )
+    common.add_argument(
+        "--api-endpoint",
+        dest="api_endpoint",
+        default="",
+        metavar="URL",
+        help=(
+            "OpenAI-compatible base URL for the API backend "
+            "(e.g. '<your-endpoint>/v1'). Only meaningful with "
+            "--model-kind=api; trailing '/' is stripped."
+        ),
+    )
+    common.add_argument(
+        "--api-key",
+        dest="api_key",
+        default="",
+        metavar="KEY",
+        help=(
+            "Bearer token for the API backend. Only meaningful with "
+            "--model-kind=api. NEVER logged."
+        ),
+    )
+    common.add_argument(
+        "--model-id",
+        dest="model_id",
+        default="",
+        metavar="ID",
+        help=(
+            "Model id the gateway should use for transcription. "
+            "Only meaningful with --model-kind=api; consult the "
+            "gateway's documentation for supported values."
         ),
     )
 
@@ -225,20 +278,41 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     watcher, mlx-whisper and the Unicode typer. Runs until Ctrl-C.
 
     Per Phase 15: this entry point neither reads nor writes the
-    persisted ``~/.config/dictate-mac/config.json`` file. The
-    recognition language comes from ``args.language`` (``--language``
-    flag, default ``"auto"``).
+    persisted ``~/.config/dictate-mac/config.json`` file. All
+    settings — language, ASR backend, API credentials — come from
+    command-line flags.
     """
     import asyncio
 
     from dictate_mac.state import DictationMachine, Settings
 
+    if args.model_kind == MODEL_KIND_API:
+        endpoint = normalize_endpoint(args.api_endpoint)
+        if not endpoint or not args.api_key or not args.model_id:
+            print(
+                "dictate-mac daemon: --model-kind=api requires "
+                "--api-endpoint, --api-key and --model-id",
+                file=sys.stderr,
+            )
+            return 2
+
     logger.info(
-        "starting daemon — output backend=%s, language=%s",
+        "starting daemon — output backend=%s, language=%s, "
+        "model_kind=%s, endpoint=%s, model_id=%s",
         args.output,
         args.language,
+        args.model_kind,
+        normalize_endpoint(args.api_endpoint) or "(local)",
+        args.model_id or "(local)",
     )
-    settings = Settings(output_backend=args.output, language=args.language)
+    settings = Settings(
+        output_backend=args.output,
+        language=args.language,
+        model_kind=args.model_kind,
+        api_endpoint=normalize_endpoint(args.api_endpoint),
+        api_key=args.api_key,
+        api_model_id=args.model_id,
+    )
     machine = DictationMachine(settings=settings)
 
     loop = asyncio.new_event_loop()
@@ -260,14 +334,15 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
 
 def cmd_menubar(args: argparse.Namespace) -> int:
-    """Launch the menu bar app (Phase 9 default).
+    """Launch the menu bar app.
 
-    Per Phase 15: the menubar entry point always sources its
-    recognition language from the persisted ``config.json`` (creating
-    it on first run if needed via
-    :func:`dictate_mac.config.load`). The ``--language`` flag from
-    argparse is intentionally NOT applied here — the CLI flag exists
-    only for subcommands that do not persist state.
+    Sources all persisted settings (language, ASR backend,
+    API credentials) from
+    ``~/.config/dictate-mac/config.json`` — created on first run if
+    needed via :func:`dictate_mac.config.load`. The ``--language``,
+    ``--model-kind`` and ``--api-*`` flags from argparse are NOT
+    applied here; CLI flags exist only for subcommands that do not
+    persist state.
     """
     from dictate_mac.config import load as load_persisted
     from dictate_mac.menubar import run_menubar
@@ -277,6 +352,10 @@ def cmd_menubar(args: argparse.Namespace) -> int:
     settings = Settings(
         output_backend=args.output,
         language=persisted.language,
+        model_kind=persisted.model_kind,
+        api_endpoint=persisted.api_endpoint,
+        api_key=persisted.api_key,
+        api_model_id=persisted.api_model_id,
     )
     return run_menubar(settings)
 

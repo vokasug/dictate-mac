@@ -6,9 +6,13 @@ into the focused window — including Citrix Workspace sessions that don't
 share the clipboard.
 
 - Model: [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo)
-  via its MLX build for Apple Silicon
+  via its MLX build for Apple Silicon, **or** any
+  OpenAI-compatible `/v1/audio/transcriptions` endpoint (your own
+  gateway, a hosted service, …)
 - Language: 100 ISO-639-1 codes Whisper supports, plus `Auto-detect`
-- Model downloads (on first run) and stays in RAM until you quit the app
+- Local backend downloads on the first run and stays in RAM until you
+  quit the app; API backend uploads only the recorded speech (after
+  silence trimming) and holds nothing extra in memory
 - Runs as a **menu bar app** with a one-line status and a Quit item —
   the default invocation `dictate-mac` launches it
 - Optional: still runs as a CLI daemon (`dictate-mac daemon`) for SSH/CI
@@ -27,10 +31,12 @@ share the clipboard.
 - [Usage](#usage)
 - [The menu bar](#the-menu-bar)
 - [Recognition language](#recognition-language)
+- [Model: local vs API](#model-local-vs-api)
 - [How It Works](#how-it-works)
 - [Installing on another Mac](#installing-on-another-mac)
 - [Troubleshooting](#troubleshooting)
 - [Uninstall](#uninstall)
+- [Known Limitations](#known-limitations)
 - [Known Limitations](#known-limitations)
 
 ---
@@ -43,8 +49,9 @@ To *run* dictate-mac:
 - **macOS 13 Ventura** or newer
 - **8 GB RAM** or more
 - Any working microphone (the built-in one is fine)
-- ~3 GB of free disk space — ~291 MB for the `.app`, ~1.5 GB for the
-  Whisper STT weights downloaded on first launch
+- ~3 GB of free disk space — ~284 MB for the `.app`, ~1.5 GB for the
+  Whisper STT weights downloaded on first launch (local backend only;
+  API backend doesn't need anything extra)
 - Internet access on the first launch (model download from
   Hugging Face)
 
@@ -73,15 +80,15 @@ weights, which download on the first launch from Hugging Face.
 
 ### 1. Download
 
-[`DictateMac-v0.2.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.2.0-macos.zip)
+[`DictateMac-v0.3.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.3.0-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
-Compressed download is ~110–140 MB; the extracted `.app` is ~291 MB.
+Compressed download is ~110–140 MB; the extracted `.app` is ~284 MB.
 
-If you want to verify the download, `DictateMac-v0.2.0-macos.zip.sha256`
+If you want to verify the download, `DictateMac-v0.3.0-macos.zip.sha256`
 ships alongside it on the release page:
 
 ```bash
-shasum -a 256 DictateMac-v0.2.0-macos.zip
+shasum -a 256 DictateMac-v0.3.0-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -90,7 +97,7 @@ shasum -a 256 DictateMac-v0.2.0-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.2.0-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.3.0-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -190,7 +197,7 @@ download on the first launch) is bundled:
   forget" on any Apple-Silicon Mac
 - com.local.dictate-mac bundle id (no code signing — local use only)
 
-**Bundle size: ~291 MB.** The shrink from a naïve py2app build comes
+**Bundle size: ~284 MB.** The shrink from a naïve py2app build comes
 from the stubs and the post-build strip pass in `setup.py`:
 
 - `silero_vad` is replaced by a numpy + onnxruntime
@@ -270,11 +277,18 @@ Privacy & Security** so the user can flip the toggle directly:
 ```
 Status: Ready — press Right Option to start and stop recording
 ─────────────────
-Permissions (reset permission and restart app if not working):
+Model (changing will restart app)
+✓ Local (mlx-community/whisper-large-v3-turbo)
+  API (https://<your-host>/v1)
+─────────────────
+Recognition language: Auto-detect
+─────────────────
+Permissions (reset permissions and restart app if not working)
 Input Monitoring
 Microphone
 Accessibility
 ─────────────────
+Open log
 About
 Restart
 Quit
@@ -322,7 +336,10 @@ missed by the model still being on disk. silero-vad's model loads
 lazily on the first recording (a few hundred ms) so we can keep
 `Ready` strictly bound to the Whisper load alone — independent of
 the silero-vad stub's `onnxruntime` session init inside the .app
-bundle.
+bundle. In **API mode** the model download + load is skipped
+entirely, so a configured API backend goes from app launch to
+`Status: Ready` in under a second even on a Mac that hasn't fetched
+the mlx weights.
 
 **CLI mode (SSH/CI/tmux):**
 
@@ -368,7 +385,7 @@ The bundled `.app` is self-contained:
 - `libportaudio.dylib` is a universal binary (`x86_64 + arm64`),
   bundled outside the zip so `dlopen` finds it on both
   architectures.
-- **Total bundle size: ~291 MB** on disk.
+- **Total bundle size: ~284 MB** on disk.
 
 Copy the `.app` to the target machine and double-click it.
 Requirements on the target machine:
@@ -429,15 +446,36 @@ CLI subcommands are reachable via the bundle's executable:
 
 It checks, in order:
 
-1. **model-load** — `mlx_whisper` weights load into RAM.
+1. **model-load** — `mlx_whisper` weights load into RAM. (Skipped in
+   API mode — use `--model-kind=api` against a stub to verify the
+   no-op warmup path separately.)
 2. **vad-silence** — 1 s of zeros → VAD returns `[]`.
 3. **vad-speech-like** — AM-modulated noise → VAD returns something or
    `[]` (silero-vad is tuned for real speech; both are fine).
 4. **asr-smoke** — `transcribe()` returns a string of any length.
 5. **typer-dispatch** — the `type_text` router picks `quartz` / `osascript`
    / default correctly **without** injecting real keystrokes.
-6. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
-   report durations.
+6. **config-v1-migration** — a v1 `config.json` loads as
+   `model_kind="local"` with empty API fields and the persisted
+   language preserved.
+7. **config-invalid-endpoint** — malformed endpoints (`ftp://…`,
+   bare host, etc.) are rejected by `PersistedSettings.is_valid`.
+8. **config-api-required-when-api** — `model_kind="local"` accepts
+   empty API fields; `model_kind="api"` rejects partial ones.
+9. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
+   amplitude preserved to within one LSB.
+10. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
+    confirms the URL, multipart `model` field, `Authorization:
+    Bearer` header and (when configured) `language` field are all
+    wired correctly.
+11. **api-transcribe-auto-language** — when the language is
+    `Auto-detect`, the `language` form field is omitted so the
+    gateway falls back to its own detection.
+12. **api-models-check** — mocked `GET /v1/models` handles 200+id,
+    200-missing-id, 401, 404 and 500 correctly, and never leaks the
+    fake API key string into any error.
+13. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
+    report durations.
 
 Exit code is 0 if all checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail.
@@ -492,11 +530,15 @@ Click the icon to open the menu:
 | Item                       | Behaviour                                           |
 | -------------------------- | --------------------------------------------------- |
 | `Status: <state>`          | Disabled, read-only. Updated every 0.5 s.          |
+| `Model (changing will restart app)` | Disabled, descriptive header.                        |
+| `Local (mlx-community/whisper-large-v3-turbo)` | Clickable. Switches the active ASR backend to the local model and restarts the app so the change takes effect. Persists to `~/.config/dictate-mac/config.json`. |
+| `API (<endpoint>)`         | Clickable. Opens the API credentials dialog (Endpoint / API key / Model ID). On a successful OK the dialog GETs `<endpoint>/models` with the bearer token to confirm the model id, persists the values, switches the active backend to API, and restarts the app. See [Model: local vs API](#model-local-vs-api) for details. |
 | `Recognition language: <X>`| Clickable. Opens a submenu of `Auto-detect` and the 100 languages Whisper supports; the active option is prefixed with `✓`. Selecting one persists the choice and applies it to the **next** recording (no restart). See [Recognition language](#recognition-language) for details. |
-| `Permissions …` header     | Disabled, descriptive label.                        |
+| `Permissions …` header     | Disabled, descriptive label (no trailing colon).   |
 | `Input Monitoring`         | Opens System Settings → Privacy & Security → Input Monitoring. |
 | `Microphone`               | Opens System Settings → Privacy & Security → Microphone. |
 | `Accessibility`            | Opens System Settings → Privacy & Security → Accessibility. |
+| `Open log`                 | Opens the daemon log file (`~/Library/Logs/dictate-mac/dictate-mac.log` for the bundled `.app`) in the user's default app. In CLI mode logs go to stderr — the parent directory (or Console.app) is opened instead. |
 | `About`                    | Opens https://github.com/vokasug/dictate-mac in the default browser. |
 | `Restart`                  | Quits the app and re-opens it (via detached `osascript`). |
 | `Quit`                     | ⌘Q (AppKit auto-renders the shortcut on the right). Stops the tap, releases the model, exits cleanly. |
@@ -524,17 +566,95 @@ reaches `Ready`.
 
 ## Recognition language
 
-The second row of the menu (`Recognition language: <X>`) is a clickable
+The fourth row of the menu (`Recognition language: <X>`) is a clickable
 label that opens a submenu of choices. The currently-selected option is
 prefixed with a checkmark (`✓`); clicking another entry makes that the
 new default. The choice is persisted between launches — no restart of
 the app is needed, and the model itself is **not** reloaded (Whisper
 reads `language` per-call, so the next recording picks up the new
-value directly).
+value directly). For the API backend the chosen language is also
+forwarded as a `language` form field on every `POST
+/v1/audio/transcriptions` request, so the gateway skips its own
+language detection.
 
 The submenu lists `Auto-detect` first, then the 100 ISO-639-1 languages
 that Whisper supports, sorted alphabetically by their English display
 name (`Russian`, `English`, `German`, …).
+
+## Model: local vs API
+
+The second section of the menu (`Model`) picks between the in-process
+mlx-whisper model and an OpenAI-compatible API backend. Both backends
+share the same audio pipeline (PortAudio → silero-vad → trimmed buffer)
+— the only difference is what happens in the **Transcribing** step.
+
+* **Local** is the default. Clicking the row switches back; the
+  daemon restarts itself so the change takes effect at boot. The
+  mlx-whisper weights stay in RAM regardless of which mode is
+  selected until that restart.
+* **API** opens a free-floating window with three fields:
+  - **Endpoint** — the OpenAI-compatible base URL, e.g.
+    `https://<host>/v1`. A trailing `/` is stripped at save time.
+  - **API key** — the bearer token. The field shows bullets by
+    default; click the eye icon next to it to reveal the value.
+  - **Model ID** — the model id the gateway should use, e.g.
+    `<your-model-id>`. The exact set of valid ids depends on the
+    gateway — see its docs.
+
+  Pressing **OK** disables the button (the label stays **OK** the
+  whole time) and sends `GET <endpoint>/models` with the bearer
+  token. The check passes only if the response contains the
+  configured `Model ID` in the `data` array. Failures are shown
+  inline (red label below the model id field) — the dialog stays
+  open so you can fix the input; only a successful check closes the
+  window and persists the values. On success the daemon restarts
+  itself so the new backend (API, no local model load) takes effect
+  at the next boot.
+
+  When the dialog first opens, the white-text line under the
+  fields shows the absolute path to `config.json` — useful when
+  you want to inspect or hand-edit the saved credentials.
+
+  The validation surfaces a categorised message for the most common
+  failure modes:
+
+  | Symptom                                 | Message                                                                 |
+  | --------------------------------------- | ----------------------------------------------------------------------- |
+  | wrong API key                           | `Authentication failed — check the API key (HTTP 401)`                  |
+  | endpoint without `/v1` (or wrong host)  | `Models endpoint not found — confirm the URL ends with /v1 (current: …)`|
+  | model id not offered by the gateway     | `Model ID '<id>' not found at <endpoint> (response listed N model(s))`  |
+  | network unreachable / DNS / timeout     | `Could not reach <endpoint>: <reason>`                                 |
+
+  The API key is **never** logged or written into any error message
+  — only the endpoint, the HTTP status, and (when useful) a truncated
+  response body. The whole config file (including the API key) sits
+  at `~/.config/dictate-mac/config.json` with mode `0o600`. The
+  key is stored as plain text — anyone with shell access to your
+  home folder can read it. Treat the file the same way you treat a
+  `.env` file: don't symlink it into a shared Dropbox folder, don't
+  commit it to a dotfiles repo.
+
+Switching between **Local** and **API** always triggers a self-restart.
+Switching from API back to Local does **not** erase the saved
+credentials — they remain on disk so re-enabling API later is a
+single click. Reopening the dialog after a previous successful save
+auto-populates all three fields (the key field shows bullets again,
+not the plain value — click the eye to confirm).
+
+The chosen recognition language is automatically forwarded as a
+`language` form field on every `POST /v1/audio/transcriptions`
+request when one is set in the menu. With `Auto-detect` selected the
+field is omitted and the gateway falls back to its own detection.
+
+CLI mode (`dictate-mac daemon`) takes the same four settings from
+flags: `--model-kind={local,api}`,
+`--api-endpoint=<url>`, `--api-key=<key>`,
+`--model-id=<id>`. The CLI does **not** validate the endpoint at
+startup — a typo surfaces as a runtime error in the log on the first
+recording, exactly like with the local backend. In API mode the
+daemon skips the local-model warmup entirely, so startup is
+immediate even on a Mac where the mlx weights are not yet
+downloaded.
 
 ### Where the choice is stored
 
@@ -557,13 +677,23 @@ contents look like:
 
 ```json
 {
-  "_v": 1,
-  "language": "ru"
+  "_v": 2,
+  "language": "ru",
+  "model_kind": "api",
+  "api_endpoint": "https://<your-host>/v1",
+  "api_key": "<your-bearer-token>",
+  "api_model_id": "<your-model-id>"
 }
 ```
 
-`_v` is the schema version (currently `1`); `language` is either an
+`_v` is the schema version (currently `2`); `language` is either an
 ISO-639-1 code (`"ru"`, `"en"`, `"de"`, …) or the sentinel `"auto"`.
+`model_kind` is `"local"` (default) or `"api"`. The remaining three
+fields are only meaningful with `model_kind=api`.
+
+Older configs written by v0.2.x (schema v1, only `language`) load
+unchanged — the missing fields default to `local` and empty strings,
+and the very next save rewrites the file as v2.
 
 ### First-run behaviour
 
@@ -583,27 +713,36 @@ clip on M1).
 ### Corrupt-config policy
 
 If the file is present but invalid — malformed JSON, a non-string
-`language` field, or a code Whisper doesn't recognise — the menu bar
-logs a warning pointing at the cause, falls back to a fresh in-memory
-default, and **does not overwrite the file**. You can repair it by
-hand and the next launch will read it normally.
+`language` field, an unknown `model_kind`, or a malformed API
+endpoint — the menu bar logs a warning pointing at the cause, falls
+back to a fresh in-memory default, and **does not overwrite the
+file**. You can repair it by hand and the next launch will read it
+normally.
 
 ### CLI subcommands never touch the config file
 
 `dictate-mac daemon`, `dictate-mac warmup`, and `dictate-mac selftest`
-take their language from the `--language` CLI flag (default `"auto"`)
-and do not read or write `~/.config/dictate-mac/config.json` under any
-circumstances. This is intentional: CLI runs are deterministic, don't
-need filesystem state, and won't race with the menu bar app.
+take all their settings from CLI flags — `--language`, `--model-kind`,
+`--api-endpoint`, `--api-key`, `--model-id` — and do not read or
+write `~/.config/dictate-mac/config.json` under any circumstances.
+This is intentional: CLI runs are deterministic, don't need
+filesystem state, and won't race with the menu bar app.
 
 Example:
 
 ```bash
-# Force Russian for this CLI session only (config file untouched):
+# Local model, Russian, this CLI session only (config file untouched):
 dictate-mac daemon --language=ru
 
 # Auto-detect for this CLI session (default):
 dictate-mac daemon
+
+# API backend — endpoint/key/id must all be provided:
+dictate-mac daemon \
+  --model-kind=api \
+  --api-endpoint=https://<your-host>/v1 \
+  --api-key=<your-bearer-token> \
+  --model-id=<your-model-id>
 ```
 
 ### Where the logs go
@@ -637,8 +776,13 @@ go to stderr; the same `logutils` module decides based on whether
 │             │            └─────┬────┬─────────┬────┘               │
 │             │                  │    │         │                     │
 │             ▼                  ▼    ▼         ▼                     │
-│       (status only)  sounddevice  silero-vad mlx-whisper           │
-│                      16 kHz PCM  ONNX (~2 MB) large-v3-turbo       │
+│       (status only)  sounddevice  silero-vad                       │
+│                      16 kHz PCM  ONNX (~2 MB)                       │
+│                              │                                   │
+│                    ┌─────────┴─────────┐                         │
+│                    ▼                   ▼                         │
+│            mlx-whisper (local)   POST /v1/audio/transcriptions  │
+│            ~1.5 GB RAM           bearer + model id (api)         │
 │                                                                   │
 │                          │ text                                  │
 │                          ▼                                       │
@@ -662,13 +806,18 @@ Communication is `queue.Queue` (hotkey events) plus a
 `threading.Lock`-guarded `state` property — no extra threading
 primitives.
 
-The daemon downloads the whisper model (if not cached) and loads it
-into RAM at startup, then arms the hotkey. Status reaches `Ready`
-only after that completes. silero-vad's ONNX model loads lazily on
-the first recording (a few hundred ms on M1) so the very first
-recording pays a tiny extra cost and every subsequent one does not.
-Quit releases everything cleanly. Subsequent recognitions take ~3 s
-on M1.
+The ASR backend is selected at startup from `~/.config/dictate-mac/
+config.json`'s `model_kind` field. In **local** mode the daemon
+downloads the whisper model (if not cached) and loads it into RAM
+on startup, then arms the hotkey. Status reaches `Ready` only after
+that completes. In **API** mode the local-model load is skipped,
+`Status: Ready` arrives within a second, and audio is POSTed to
+the configured gateway per recording. silero-vad's ONNX model loads
+lazily on the first recording (a few hundred ms on M1) so the very
+first recording pays a tiny extra cost and every subsequent one does
+not. Quit releases everything cleanly. Local-mode recognitions take
+~3 s on M1; API-mode recognitions take only the round-trip time to
+the gateway (typically 0.3-1 s).
 
 ## Troubleshooting
 
@@ -785,7 +934,10 @@ revoke `com.local.dictate-mac` (the bundled `.app` id) in
 
 ## Known Limitations
 
-- ~1.5 GB of RAM is held permanently after the first startup.
+- ~1.5 GB of RAM is held permanently after the first startup **when
+  using the local backend**. The API backend doesn't load any ASR
+  weights into memory — its startup is instantaneous and can run on
+  Mac models where the mlx weights aren't downloaded.
 - Citrix Viewer requires **Send Unicode keyboard input** to be enabled
   (default in modern versions).
 - macOS TCC permissions (Microphone, Accessibility, Input Monitoring)
@@ -817,5 +969,8 @@ revoke `com.local.dictate-mac` (the bundled `.app` id) in
   before launch. Grant it in System Settings → Privacy & Security →
   Input Monitoring, then Quit + reopen DictateMac (macOS itself
   prompts for the relaunch).
+- Switching the ASR backend (**Local** ↔ **API**) always triggers a
+  restart. The menu click is automatic; the user is dropped into the
+  freshly-launched bundle with the new backend active.
 - Python 3.13.x only; 3.14 is unsupported because `mlx` does not yet
   ship a wheel for it.

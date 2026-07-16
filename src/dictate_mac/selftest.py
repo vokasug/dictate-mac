@@ -1,10 +1,11 @@
 """End-to-end self-test for dictate-mac.
 
 Runs the headless portion of the pipeline (model load, VAD trimming, ASR
-smoke, typer dispatch routing) and reports each step. Designed to be
-runnable on any Mac without Accessibility permission for keystroke
-injection, and (optionally) without microphone access — so it can act as
-a smoke test after installation or after dependency changes.
+smoke, typer dispatch routing, config migration, API-ASR plumbing) and
+reports each step. Designed to be runnable on any Mac without
+Accessibility permission for keystroke injection, and (optionally)
+without microphone access — so it can act as a smoke test after
+installation or after dependency changes.
 
 Usage::
 
@@ -17,15 +18,26 @@ PASS/FAIL line plus a short detail string.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List
 
 import numpy as np
 
 from dictate_mac.audio import SAMPLE_RATE, Recorder, trim_silence
-from dictate_mac.transcriber import model_loaded, transcribe, warm
+from dictate_mac.transcriber import (
+    MODEL_KIND_API,
+    _audio_to_wav_bytes,
+    _transcribe_api,
+    check_api_model_available,
+    model_loaded,
+    transcribe,
+    warm,
+)
 from dictate_mac.typer import type_text
 
 logger = logging.getLogger("dictate_mac.selftest")
@@ -219,6 +231,427 @@ def test_mic_roundtrip(seconds: float = 1.5, language: str = "auto") -> Result:
     )
 
 
+def test_config_v1_migration_keeps_language() -> Result:
+    """A v1 config.json (no model_kind) loads as model_kind='local' with
+    empty API fields and the persisted language preserved."""
+    from dictate_mac import config as config_mod
+
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "config.json"
+        target.write_text(json.dumps({"_v": 1, "language": "ru"}))
+
+        original = config_mod.config_path
+        try:
+            config_mod.config_path = lambda: target
+            loaded = config_mod.load()
+        finally:
+            config_mod.config_path = original
+
+        if loaded.language != "ru":
+            return Result(
+                "config-v1-migration",
+                False,
+                f"language lost: {loaded.language!r} (expected 'ru')",
+            )
+        if loaded.model_kind != config_mod.MODEL_KIND_LOCAL:
+            return Result(
+                "config-v1-migration",
+                False,
+                f"model_kind wrong: {loaded.model_kind!r}",
+            )
+        if loaded.api_endpoint or loaded.api_key or loaded.api_model_id:
+            return Result(
+                "config-v1-migration",
+                False,
+                "v1 file unexpectedly produced non-empty API fields",
+            )
+
+        on_disk_after = json.loads(target.read_text())
+        if on_disk_after.get("_v") != 1:
+            return Result(
+                "config-v1-migration",
+                False,
+                f"v1 file was rewritten on load: {on_disk_after}",
+            )
+
+        return Result(
+            "config-v1-migration",
+            True,
+            "v1 schema accepted, language preserved, model_kind defaulted to 'local'",
+        )
+
+
+def test_config_invalid_endpoint_rejected() -> Result:
+    """PersistedSettings with model_kind='api' and a non-http endpoint
+    is rejected by ``is_valid``."""
+    from dictate_mac.config import PersistedSettings
+
+    invalid_endpoints = [
+        "",
+        "ftp://example.test/v1",
+        "example.test/v1",
+        "htp:/typo.example/v1",
+    ]
+    for endpoint in invalid_endpoints:
+        s = PersistedSettings(
+            model_kind=MODEL_KIND_API,
+            api_endpoint=endpoint,
+            api_key="k",
+            api_model_id="m",
+        )
+        if s.is_valid():
+            return Result(
+                "config-invalid-endpoint",
+                False,
+                f"endpoint {endpoint!r} should be rejected",
+            )
+    return Result(
+        "config-invalid-endpoint",
+        True,
+        f"rejected {len(invalid_endpoints)} malformed endpoints",
+    )
+
+
+def test_config_missing_api_fields_when_kind_local() -> Result:
+    """PersistedSettings with model_kind='local' accepts empty
+    api_* fields; the same payload with model_kind='api' is rejected."""
+    from dictate_mac.config import PersistedSettings
+
+    local_only = PersistedSettings(model_kind="local")
+    if not local_only.is_valid():
+        return Result(
+            "config-api-required-when-api",
+            False,
+            "local model_kind with empty API fields should be valid",
+        )
+
+    api_partial = PersistedSettings(
+        model_kind=MODEL_KIND_API, api_endpoint="http://x/v1",
+    )
+    if api_partial.is_valid():
+        return Result(
+            "config-api-required-when-api",
+            False,
+            "api model_kind missing key + model_id should be invalid",
+        )
+
+    return Result(
+        "config-api-required-when-api",
+        True,
+        "local kind accepts empty API fields; api kind rejects partial fields",
+    )
+
+
+def test_audio_to_wav_bytes_round_trip() -> Result:
+    """numpy -> int16 WAV bytes -> numpy: amplitude preserved within
+    one quantization step."""
+    import io
+    import wave
+
+    duration = 0.5
+    sr = SAMPLE_RATE
+    t = np.arange(int(duration * sr)) / sr
+    audio = (0.4 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    wav = _audio_to_wav_bytes(audio, sr)
+
+    if wav[:4] != b"RIFF":
+        return Result(
+            "audio-wav-roundtrip",
+            False,
+            f"unexpected wav header: {wav[:4]!r}",
+        )
+
+    with wave.open(io.BytesIO(wav), "rb") as r:
+        if r.getnchannels() != 1:
+            return Result(
+                "audio-wav-roundtrip",
+                False,
+                f"channels={r.getnchannels()} (expected 1)",
+            )
+        if r.getframerate() != sr:
+            return Result(
+                "audio-wav-roundtrip",
+                False,
+                f"sample rate={r.getframerate()} (expected {sr})",
+            )
+        if r.getsampwidth() != 2:
+            return Result(
+                "audio-wav-roundtrip",
+                False,
+                f"sample width={r.getsampwidth()} (expected 2)",
+            )
+        decoded = np.frombuffer(r.readframes(r.getnframes()), dtype=np.int16)
+
+    expected = np.clip(audio * 32767.0, -32768.0, 32767.0).astype(np.int16)
+    diff = int(np.abs(decoded.astype(np.int32) - expected.astype(np.int32)).max())
+    if diff > 1:
+        return Result(
+            "audio-wav-roundtrip",
+            False,
+            f"amplitude drift {diff} LSB exceeds 1-sample tolerance",
+        )
+
+    empty_wav = _audio_to_wav_bytes(np.zeros(0, dtype=np.float32), sr)
+    if len(empty_wav) < 44:
+        return Result(
+            "audio-wav-roundtrip",
+            False,
+            f"empty audio produced {len(empty_wav)} bytes (need header)",
+        )
+
+    return Result(
+        "audio-wav-roundtrip",
+        True,
+        f"{audio.size} samples encoded and decoded, max drift {diff} LSB",
+    )
+
+
+def test_api_transcribe_sends_model_id_and_bearer() -> Result:
+    """Mock ``requests.post`` and confirm the ASR builder sends the
+    correct URL, multipart `model` field and `Authorization` header."""
+    import dictate_mac.transcriber as t
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 200
+        ok = True
+        text = ""
+
+        def json(self) -> dict:
+            return {"text": "  hello world  "}
+
+    def fake_post(url, *, files, data, headers, timeout):
+        captured["url"] = url
+        captured["files"] = files
+        captured["data"] = data
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return _FakeResp()
+
+    class _FakeRequests:
+        def post(self, url, *, files, data, headers, timeout):
+            return fake_post(url, files=files, data=data, headers=headers, timeout=timeout)
+
+    real = t.requests
+    try:
+        t.requests = _FakeRequests()
+        audio = np.zeros(SAMPLE_RATE // 4, dtype=np.float32)
+        text = t.transcribe(
+            audio,
+            language="en",
+            model_kind=t.MODEL_KIND_API,
+            api_endpoint="http://example.test/v1/",
+            api_key="TESTKEY",
+            api_model_id="test-model",
+        )
+    finally:
+        t.requests = real
+
+    if text != "hello world":
+        return Result(
+            "api-transcribe-headers",
+            False,
+            f"unexpected text: {text!r}",
+        )
+    if captured.get("url") != "http://example.test/v1/audio/transcriptions":
+        return Result(
+            "api-transcribe-headers",
+            False,
+            f"unexpected url: {captured.get('url')!r}",
+        )
+    if captured.get("data", {}).get("model") != "test-model":
+        return Result(
+            "api-transcribe-headers",
+            False,
+            f"multipart model wrong: {captured.get('data', {}).get('model')!r}",
+        )
+    if captured.get("data", {}).get("language") != "en":
+        return Result(
+            "api-transcribe-headers",
+            False,
+            f"language field wrong: {captured.get('data', {}).get('language')!r} "
+            "(expected 'en' to be forwarded to the gateway)",
+        )
+    if captured.get("headers", {}).get("Authorization") != "Bearer TESTKEY":
+        return Result(
+            "api-transcribe-headers",
+            False,
+            f"Authorization header wrong: "
+            f"{captured.get('headers', {}).get('Authorization')!r}",
+        )
+    file_payload = captured.get("files", {})
+    file_name = file_payload.get("file", (None, None, None))[0]
+    if file_name != "audio.wav":
+        return Result(
+            "api-transcribe-headers",
+            False,
+            f"file name wrong: {file_name!r}",
+        )
+
+    return Result(
+        "api-transcribe-headers",
+        True,
+        "POST url+model+bearer+filename+language all wired correctly",
+    )
+
+
+def test_api_transcribe_omits_language_when_auto() -> Result:
+    """When ``language='auto'`` (the sentinel), the multipart body
+    must NOT carry a ``language`` field — the gateway should fall
+    back to its own language detection."""
+    import dictate_mac.transcriber as t
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 200
+        ok = True
+        text = ""
+
+        def json(self) -> dict:
+            return {"text": "hi"}
+
+    class _FakeRequests:
+        def post(self, url, *, files, data, headers, timeout):
+            captured["data"] = data
+            return _FakeResp()
+
+    real = t.requests
+    try:
+        t.requests = _FakeRequests()
+        t.transcribe(
+            np.zeros(SAMPLE_RATE // 4, dtype=np.float32),
+            language="auto",
+            model_kind=t.MODEL_KIND_API,
+            api_endpoint="http://example.test/v1",
+            api_key="k",
+            api_model_id="m",
+        )
+    finally:
+        t.requests = real
+
+    if "language" in captured.get("data", {}):
+        return Result(
+            "api-transcribe-auto-language",
+            False,
+            f"'language' field should be absent in auto mode, "
+            f"got {captured['data'].get('language')!r}",
+        )
+    return Result(
+        "api-transcribe-auto-language",
+        True,
+        "'language' field omitted from form when language='auto'",
+    )
+
+
+def test_models_endpoint_check_accepts_and_rejects() -> Result:
+    """Mock ``GET /models`` with several response shapes and confirm
+    the validator categorises each correctly. Secret strings must
+    never appear in the raised errors."""
+    import dictate_mac.transcriber as t
+
+    case_results: list[tuple[str, bool, str | None]] = []
+
+    class _FakeResp:
+        def __init__(self, status_code: int, payload: dict | None = None,
+                     text: str = "") -> None:
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text
+            self.ok = 200 <= status_code < 300
+
+        def json(self) -> dict:
+            assert self._payload is not None
+            return self._payload
+
+    def run_case(name: str, status: int, payload: dict | None,
+                 expect_ok: bool, must_not_contain: str | None = None) -> None:
+        captured: dict = {}
+
+        class _FakeReq:
+            def get(self, url, *, headers, timeout):
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["timeout"] = timeout
+                return _FakeResp(status, payload)
+
+        real = t.requests
+        try:
+            t.requests = _FakeReq()
+            try:
+                check_api_model_available(
+                    "http://example.test/v1",
+                    "SECRET_KEY_DO_NOT_LEAK",
+                    "wanted-model",
+                    timeout=5.0,
+                )
+                outcome_ok = True
+                detail = None
+            except RuntimeError as exc:
+                outcome_ok = False
+                detail = str(exc)
+        finally:
+            t.requests = real
+
+        if expect_ok != outcome_ok:
+            case_results.append((name, False, f"expected ok={expect_ok} got {outcome_ok} ({detail})"))
+            return
+        if must_not_contain is not None and detail is not None and must_not_contain in detail:
+            case_results.append((name, False, f"error leaked secret: {detail!r}"))
+            return
+        case_results.append((name, True, None))
+
+    run_case(
+        "200 with model",
+        200,
+        {"data": [{"id": "wanted-model"}, {"id": "other"}]},
+        expect_ok=True,
+    )
+    run_case(
+        "200 missing model",
+        200,
+        {"data": [{"id": "different-model"}]},
+        expect_ok=False,
+        must_not_contain="SECRET_KEY_DO_NOT_LEAK",
+    )
+    run_case(
+        "401",
+        401,
+        None,
+        expect_ok=False,
+        must_not_contain="SECRET_KEY_DO_NOT_LEAK",
+    )
+    run_case(
+        "404",
+        404,
+        None,
+        expect_ok=False,
+        must_not_contain="SECRET_KEY_DO_NOT_LEAK",
+    )
+    run_case(
+        "500",
+        500,
+        None,
+        expect_ok=False,
+        must_not_contain="SECRET_KEY_DO_NOT_LEAK",
+    )
+
+    failures = [r for r in case_results if not r[1]]
+    if failures:
+        msg = "; ".join(f"{n}: {d}" for n, _, d in failures)
+        return Result(
+            "api-models-check",
+            False,
+            f"{len(failures)} case(s) failed: {msg}",
+        )
+    return Result(
+        "api-models-check",
+        True,
+        f"{len(case_results)} cases (200/id, 200/missing, 401, 404, 500) handled correctly",
+    )
+
+
 def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
     tests: List[Callable[[], Result]] = [
         test_model_load,
@@ -226,6 +659,13 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_vad_speech_like,
         lambda: test_asr_smoke(language=language),
         test_typer_dispatch,
+        test_config_v1_migration_keeps_language,
+        test_config_invalid_endpoint_rejected,
+        test_config_missing_api_fields_when_kind_local,
+        test_audio_to_wav_bytes_round_trip,
+        test_api_transcribe_sends_model_id_and_bearer,
+        test_api_transcribe_omits_language_when_auto,
+        test_models_endpoint_check_accepts_and_rejects,
     ]
     if with_mic:
         tests.append(lambda: test_mic_roundtrip(language=language))

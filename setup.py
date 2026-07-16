@@ -563,71 +563,6 @@ def _extract_native_runtime_libs(app_dist: Path) -> None:
         )
 
 
-def _fixup_native_library_rpaths(app_dist: Path) -> None:
-    """Rewrite broken ``LC_RPATH`` baked into wheel-built .dylibs.
-
-    PyTorch wheels (libtorch / libc10 / libtorch_cpu / ...) and
-    torchaudio wheels are built inside a CI conda environment
-    (``/Users/ec2-user/runner/_work/_temp/conda_environment_…/lib``),
-    and that absolute path ends up embedded in the wheel's ``.so`` /
-    ``.dylib`` LC_RPATH. macOS's dyld tries that path first and
-    fails — never reaching the bundle's own torch libs that py2app
-    copied into ``Contents/Resources/lib/python3.13/torch/lib/``.
-
-    We use ``install_name_tool -rpath`` to swap the absolute path for
-    ``@loader_path/…`` (relative to the file's own location). This is
-    safe to run on signed binaries we don't sign.
-    """
-    import re
-    import subprocess
-
-    # Files known to ship with the broken build-time LC_RPATH:
-    # torchaudio's abi3 modules reference the conda env path. Other
-    # torch dylibs already use ``@loader_path/lib`` so they're fine.
-    targets = [
-        app_dist
-        / "Contents/Resources/lib/python3.13/torchaudio/lib/_torchaudio.abi3.so",
-        app_dist
-        / "Contents/Resources/lib/python3.13/torchaudio/lib/libtorchaudio.abi3.so",
-    ]
-
-    # Map the broken absolute prefix to a relative path that walks
-    # from ``…/torchaudio/lib/_torchaudio.abi3.so`` up to the bundle's
-    # torch/lib directory. (@loader_path is the .so's own directory.)
-    old_prefix = "/Users/ec2-user/runner/_work/_temp/"
-    new_prefix = "@loader_path/../../torch/lib"
-
-    for t in targets:
-        if not t.exists():
-            continue
-        info = subprocess.run(
-            ["otool", "-l", str(t)],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-        rpaths = re.findall(r"path\s+(\S+)", info)
-        if not any(rp.startswith(old_prefix) for rp in rpaths):
-            continue
-        for rp in rpaths:
-            if not rp.startswith(old_prefix):
-                continue
-            subprocess.run(
-                [
-                    "install_name_tool",
-                    "-rpath",
-                    rp,
-                    new_prefix,
-                    str(t),
-                ],
-                check=True,
-                capture_output=True,
-            )
-            print(
-                f"  fixed LC_RPATH in {t.name}: {rp} → {new_prefix}"
-            )
-
-
 def _rewrite_boot_script(app_dist: Path) -> None:
     """Patch py2app's hardcoded build-time prefix in __boot__.py.
 
@@ -760,22 +695,19 @@ def _strip_info_plist_paths(app_dist: Path) -> None:
 def _install_torchaudio_stub(app_dist: Path) -> None:
     """Replace the bundled torchaudio package with a stub.
 
-    The real torchaudio wheel's C extension (``_torchaudio.abi3.so``)
-    ships with an LC_RPATH pointing at the build machine's conda
-    env (``/Users/ec2-user/runner/_work/_temp/conda_environment_…``)
-    and an LC_RPATH'd ``libtorchaudio`` that fails to ``dlopen`` under
-    our bundle. Even after rewriting the LC_RPATH to ``@loader_path/…
-    /torch/lib`` (see ``_fixup_native_library_rpaths``), the
-    libtorchaudio binary hangs the dlopen — most likely the libc10
-    install_name chain references more wheels that weren't bundled.
+    The real torchaudio wheel ships a C extension
+    (``_torchaudio.abi3.so``) whose ``libtorchaudio`` binary fails to
+    ``dlopen`` under our bundle — its ``install_name`` chain
+    references wheel dependencies that py2app doesn't bundle. We don't
+    actually need torchaudio at runtime: we feed raw ``numpy.ndarray``
+    from PortAudio into silero-vad, which only uses
+    ``torchaudio.read_audio`` / ``save_audio`` / ``transforms.Resample``
+    for *file* I/O that we never invoke. ``mlx_whisper`` doesn't
+    touch torchaudio at all.
 
     Workaround: install a stub ``torchaudio`` package that exports
-    the attribute paths silero-vad and mlx_whisper look up, with
-    no-op fallbacks where possible. silero-vad only uses
-    ``read_audio``/``save_audio``/``Resample`` for *file* I/O — we
-    feed it raw ``numpy.ndarray`` from PortAudio, so the stub never
-    has to actually transcode anything. mlx_whisper doesn't touch
-    torchaudio at all.
+    the attribute paths silero-vad looks up at module top-level,
+    with no-op fallbacks where possible.
 
     Drop the stub directory if the user later needs torchaudio-backed
     audio I/O in the bundle.
@@ -796,14 +728,13 @@ parts of it (``read_audio``, ``save_audio``, ``transforms.Resample``)
 that we never call — silero-vad's VAD pipeline operates on raw
 ``numpy.ndarray`` samples, not torchaudio tensors.
 
-The real torchaudio wheel's C extension (``_torchaudio.abi3.so``)
-ships with an LC_RPATH pointing at the build machine's conda env
-(``/Users/ec2-user/runner/_work/...``) and a separate
-``libtorchaudio`` binary whose dependencies fail to load under the
-bundle. Rather than patch the wheel's C-level linking, we replace
-the torchaudio import with this stub. The stub exposes the attribute
-paths silero-vad and mlx_whisper look up, returning no-ops that
-keep them happy.
+The real torchaudio wheel ships a ``libtorchaudio`` binary whose
+``install_name`` chain references wheel dependencies that py2app
+doesn't bundle, so it fails to ``dlopen`` under our bundle. Rather
+than patch the wheel's C-level linking, we replace the torchaudio
+import with this stub. The stub exposes the attribute paths
+silero-vad and mlx_whisper look up, returning no-ops that keep them
+happy.
 
 If the user later needs torchaudio-backed audio I/O, drop this
 directory and let the real wheel take over.
@@ -1727,7 +1658,6 @@ def main() -> None:
     app_dist = PROJECT_ROOT / "dist" / "DictateMac.app"
     if app_dist.exists():
         _extract_native_runtime_libs(app_dist)
-        _fixup_native_library_rpaths(app_dist)
         _install_torchaudio_stub(app_dist)
         _install_silero_vad_stub(app_dist)
         _install_timing_stub(app_dist)

@@ -24,6 +24,10 @@ Context menu (top → bottom)
 * ``Microphone`` — clickable; opens the Microphone pane.
 * ``Accessibility`` — clickable; opens the Accessibility pane.
 * separator
+* ``Open log`` — clickable; opens the daemon log file
+  (``~/Library/Logs/dictate-mac/dictate-mac.log`` in app-bundle mode)
+  in the user's default app. In CLI mode logs go to stderr and the
+  parent directory (or Console.app) is opened instead.
 * ``About`` — clickable; opens https://github.com/vokasug/dictate-mac in the
   default browser.
 * ``Restart`` — clickable; relaunches the ``.app`` bundle.
@@ -86,7 +90,13 @@ import rumps
 from rumps import events
 
 from dictate_mac import config as config_mod
+from dictate_mac.config import (
+    MODEL_KIND_API,
+    MODEL_KIND_LOCAL,
+    normalize_endpoint,
+)
 from dictate_mac.state import DictationMachine, Settings, State
+from dictate_mac.transcriber import MODEL_REPO
 
 logger = logging.getLogger("dictate_mac.menubar")
 
@@ -100,8 +110,9 @@ STATUS_REFRESH_SECONDS = 0.5
 
 # User-facing strings
 LANG_PARENT_LABEL = "Recognition language:"
+MODEL_HEADER = "Model (changing will restart app)"
 PERMISSIONS_HEADER = (
-    "Permissions (reset permission and restart app if not working):"
+    "Permissions (reset permissions and restart app if not working)"
 )
 ABOUT_URL = "https://github.com/vokasug/dictate-mac"
 
@@ -187,6 +198,27 @@ class MenubarApp(rumps.App):
             self._lang_items[code] = item
             self._lang_parent.add(item)
 
+        # ---- model submenu -------------------------------------------
+        # Disabled header + two clickable rows: a local mlx-whisper
+        # row that switches back without prompting, and an API row that
+        # opens the credentials dialog (see model_settings_dialog.py).
+        # The API row's title carries the active endpoint host so the
+        # user knows where audio will go without re-opening the dialog.
+        self._model_header = rumps.MenuItem(MODEL_HEADER, callback=None)
+        try:
+            self._model_header._menuitem.setEnabled_(False)
+        except Exception:  # noqa: BLE001
+            pass
+
+        self._model_local_item = rumps.MenuItem(
+            self._format_model_local_title(settings.model_kind),
+            callback=self._select_model_local,
+        )
+        self._model_api_item = rumps.MenuItem(
+            self._format_model_api_title(settings.api_endpoint, settings.model_kind),
+            callback=self._open_model_api_dialog,
+        )
+
         # ---- permissions header (disabled) ----------------------------
         self._perms_header = rumps.MenuItem(PERMISSIONS_HEADER, callback=None)
         try:
@@ -208,7 +240,8 @@ class MenubarApp(rumps.App):
             callback=self._open_accessibility_settings,
         )
 
-        # ---- About / Restart / Quit -----------------------------------
+        # ---- Open log / About / Restart / Quit -----------------------
+        self._open_log_item = rumps.MenuItem("Open log", callback=self._open_log_file)
         self._about_item = rumps.MenuItem("About", callback=self._open_about)
         self._restart_item = rumps.MenuItem("Restart", callback=self._restart_app)
         self._quit_item = rumps.MenuItem("Quit", callback=rumps.quit_application)
@@ -227,6 +260,10 @@ class MenubarApp(rumps.App):
         self.menu = [
             self._status_item,
             None,  # separator
+            self._model_header,
+            self._model_local_item,
+            self._model_api_item,
+            None,  # separator
             self._lang_parent,
             None,  # separator
             self._perms_header,
@@ -234,6 +271,7 @@ class MenubarApp(rumps.App):
             self._perm_microphone,
             self._perm_accessibility,
             None,  # separator
+            self._open_log_item,
             self._about_item,
             self._restart_item,
             self._quit_item,
@@ -360,6 +398,38 @@ class MenubarApp(rumps.App):
     def _open_about(self, _sender) -> None:
         self._open_url(ABOUT_URL)
 
+    def _open_log_file(self, _sender) -> None:
+        """Open the daemon log file in the user's default app.
+
+        When running from a bundled ``.app``, logs go to
+        ``~/Library/Logs/dictate-mac/dictate-mac.log`` (see
+        :mod:`dictate_mac.logutils`). In CLI mode logs go to stderr
+        and there is no file to open — we fall back to opening the
+        log directory so the user can find where files would go.
+        """
+        from dictate_mac.logutils import LOG_FILE, is_app_bundle
+
+        if is_app_bundle() and LOG_FILE.exists():
+            self._open_url(LOG_FILE.as_uri())
+            return
+
+        if is_app_bundle():
+            # Log file does not exist yet — open its parent directory.
+            parent = LOG_FILE.parent
+            if parent.exists():
+                self._open_url(parent.as_uri())
+                return
+
+        # CLI / source-venv mode: logs go to stderr, no log file on disk.
+        # Show a hint in Console.app instead so the user can still find
+        # the running daemon's stderr output if captured by their shell.
+        try:
+            import subprocess
+
+            subprocess.Popen(["open", "-a", "Console"])
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not open Console: %s", exc)
+
     def _restart_app(self, _sender) -> None:
         """Quit, then re-open the current ``.app`` bundle.
 
@@ -434,6 +504,19 @@ class MenubarApp(rumps.App):
         prefix = CHECK_GLYPH if code == active else "  "
         return f"{prefix}{display}"
 
+    @staticmethod
+    def _format_model_local_title(active_kind: str) -> str:
+        prefix = CHECK_GLYPH if active_kind == MODEL_KIND_LOCAL else "  "
+        return f"{prefix}Local ({MODEL_REPO})"
+
+    @staticmethod
+    def _format_model_api_title(endpoint: str, active_kind: str) -> str:
+        prefix = CHECK_GLYPH if active_kind == MODEL_KIND_API else "  "
+        base = normalize_endpoint(endpoint)
+        if not base:
+            return f"{prefix}API"
+        return f"{prefix}API ({base})"
+
     def _make_lang_callback(self, code: str):
         def callback(_sender) -> None:
             self._set_language(code)
@@ -455,9 +538,7 @@ class MenubarApp(rumps.App):
         previous = self._settings.language
         self._settings.language = code
         try:
-            config_mod.save(config_mod.PersistedSettings(language=code))
-        except OSError as exc:
-            logger.warning("could not persist language=%s: %s", code, exc)
+            self._persist_settings()
         except ValueError as exc:
             logger.warning("rejected language=%s: %s", code, exc)
             self._settings.language = previous
@@ -469,9 +550,9 @@ class MenubarApp(rumps.App):
     def _refresh_lang_menu(self) -> None:
         """Resync the Recognition-language submenu with current state.
 
-        Cheap; safe to call from any thread that holds the main loop
-        (the 0.5 s refresh timer). Itself idempotent: no-op when the
-        parent label and item titles already match.
+        Idempotent: no-op when the parent label and item titles
+        already match. Called synchronously from ``_set_language`` —
+        the 0.5 s status timer no longer drives this refresh.
         """
         active = self._settings.language
         new_parent = self._format_lang_parent_title(active)
@@ -483,6 +564,109 @@ class MenubarApp(rumps.App):
             if item.title != new_item:
                 item.title = new_item
 
+    # -- model submenu ----------------------------------------------------
+
+    def _trigger_model_restart(self) -> None:
+        """Quit + reopen the bundle so the new ASR backend takes effect.
+
+        The local model is loaded once at startup and held in RAM;
+        switching from local to API doesn't release it, and switching
+        from API to local would need to trigger a fresh ~30-60 s
+        download/load. The cleanest UX is to restart the bundle and
+        let the new config take effect at boot.
+        """
+        logger.info("model switch: triggering restart for new backend")
+        try:
+            self._restart_app(None)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("model switch: restart failed: %s", exc)
+
+    def _select_model_local(self, _sender) -> None:
+        """Switch back to the local mlx-whisper model and restart."""
+        if self._settings.model_kind == MODEL_KIND_LOCAL:
+            return
+        logger.info("model switched: %s -> local", self._settings.model_kind)
+        self._settings.model_kind = MODEL_KIND_LOCAL
+        self._persist_settings()
+        self._refresh_model_menu()
+        self._trigger_model_restart()
+
+    def _open_model_api_dialog(self, _sender) -> None:
+        """Open the API credentials dialog.
+
+        Switching the active backend to API only happens after the
+        dialog's OK button passes a ``GET /models`` check against the
+        entered endpoint. On success the new config is persisted and
+        the bundle is restarted so the new backend takes effect.
+        """
+        logger.info("api dialog: callback fired")
+        try:
+            from dictate_mac.model_settings_dialog import (
+                ApiModelSettingsDialog,
+                ApiModelSettingsResult,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("api dialog: import failed: %s", exc)
+            return
+
+        try:
+            if not hasattr(self, "_api_dialog") or self._api_dialog is None:
+                logger.info("api dialog: constructing new instance")
+                self._api_dialog = ApiModelSettingsDialog()
+            else:
+                logger.info("api dialog: reusing existing instance")
+            result = self._api_dialog.show(
+                endpoint=self._settings.api_endpoint,
+                api_key=self._settings.api_key,
+                api_model_id=self._settings.api_model_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("api dialog: show() raised: %s", exc)
+            return
+
+        if isinstance(result, ApiModelSettingsResult):
+            self._settings.api_endpoint = result.endpoint
+            self._settings.api_key = result.api_key
+            self._settings.api_model_id = result.api_model_id
+            self._settings.model_kind = MODEL_KIND_API
+            self._persist_settings()
+            logger.info(
+                "model switched: -> api (endpoint=%s, model_id=%s)",
+                result.endpoint,
+                result.api_model_id,
+            )
+            self._refresh_model_menu()
+            self._trigger_model_restart()
+
+    def _refresh_model_menu(self) -> None:
+        """Resync the Model submenu with the active settings."""
+        new_local = self._format_model_local_title(self._settings.model_kind)
+        if self._model_local_item.title != new_local:
+            self._model_local_item.title = new_local
+        new_api = self._format_model_api_title(
+            self._settings.api_endpoint, self._settings.model_kind
+        )
+        if self._model_api_item.title != new_api:
+            self._model_api_item.title = new_api
+
+    def _persist_settings(self) -> None:
+        """Atomically persist the in-memory ``Settings`` to the config file."""
+        try:
+            config_mod.save(
+                config_mod.PersistedSettings(
+                    language=self._settings.language,
+                    model_kind=self._settings.model_kind,
+                    api_endpoint=self._settings.api_endpoint,
+                    api_key=self._settings.api_key,
+                    api_model_id=self._settings.api_model_id,
+                )
+            )
+        except OSError as exc:
+            logger.warning("could not persist settings: %s", exc)
+        except ValueError as exc:
+            logger.warning("rejected settings: %s", exc)
+            raise
+
     # -- refresh timers ---------------------------------------------------
 
     @rumps.timer(STATUS_REFRESH_SECONDS)
@@ -491,10 +675,9 @@ class MenubarApp(rumps.App):
 
         Runs on the main thread every 0.5 s. Reads the thread-safe
         ``DictationMachine.state`` snapshot — no locks needed in this
-        direction. Also re-syncs the Recognition-language submenu so
-        the checkmark / parent label stay correct across any future
-        code paths that mutate ``settings.language`` outside this
-        callback.
+        direction. The Recognition-language and Model submenus are not
+        touched here: those are refreshed synchronously from their own
+        callbacks when the user actually changes them.
         """
         try:
             state = self._machine.state
@@ -506,7 +689,6 @@ class MenubarApp(rumps.App):
             new_title = f"Status: {label}"
             if self._status_item.title != new_title:
                 self._status_item.title = new_title
-        self._refresh_lang_menu()
 
 
 def sys_argv0() -> str:

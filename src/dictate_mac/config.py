@@ -1,13 +1,30 @@
-"""Persisted user settings (Phase 15).
+"""Persisted user settings.
 
-Stores the recognition language preference in an XDG-style JSON file at
+Stores recognition language, ASR backend choice, and API-mode
+credentials in an XDG-style JSON file at
 ``$XDG_CONFIG_HOME/dictate-mac/config.json`` (default
 ``~/.config/dictate-mac/config.json``). Atomic write via ``os.replace``,
 mode ``0o600``. Created lazily on first save.
 
 CLI subcommands (``daemon``, ``warmup``, ``selftest``) never read or write
 this file — the only reader/writer is the menu bar entry point. CLI paths
-take ``--language`` from the command line directly.
+take all of their settings from command-line flags directly.
+
+Schema
+------
+
+v1 (legacy) — recognised for read but never written by the current code:
+
+    ``{"_v": 1, "language": "<iso-639-1 or 'auto'>"}``
+
+v2 (current) — produced on every save:
+
+    ``{"_v": 2, "language": ..., "model_kind": "local|api",
+       "api_endpoint": ..., "api_key": ..., "api_model_id": ...}``
+
+v1 files load as ``model_kind="local"`` and empty API fields; the
+persisted language is preserved untouched. Subsequent saves rewrite
+the file as v2 — no manual migration needed.
 
 Behaviour
 ---------
@@ -18,12 +35,16 @@ Behaviour
   or ``None`` if the call fails or no entry is supported.
 * ``resolve_initial_language()`` wraps the detector: a non-supported
   result or ``None`` maps to :data:`AUTO` (``"auto"``).
-* ``load()`` reads the config file. If valid and the language field is
-  in ``{AUTO} ∪ SUPPORTED_ISO_639_1``, returns those settings. If the
-  file is missing or corrupted, runs ``resolve_initial_language()``,
-  writes the resolved value back, and returns those settings.
+* ``load()`` reads the config file. If valid, returns the parsed
+  settings. If the file is missing or corrupted, runs
+  ``resolve_initial_language()``, writes the resolved value back as a
+  fresh v2 file, and returns those settings.
 * ``save()`` performs atomic replace (tmp file → ``os.replace``) with
   mode ``0o600``; safe to call from the menu bar's main thread.
+* ``normalize_endpoint()`` strips whitespace and trailing ``/`` from
+  a user-entered endpoint URL so storage and request building always
+  operate on a canonical form. The result is what gets written to
+  the config file when the modal saves.
 
 The 100 supported languages follow ``mlx_whisper.tokenizer.LANGUAGES``,
 matching what Whisper's ``transcribe`` function accepts as
@@ -35,14 +56,17 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Dict, FrozenSet, Optional
 
 logger = logging.getLogger("dictate_mac.config")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 AUTO = "auto"
+MODEL_KIND_LOCAL = "local"
+MODEL_KIND_API = "api"
+MODEL_KINDS = (MODEL_KIND_LOCAL, MODEL_KIND_API)
 
 LANGUAGES: Dict[str, str] = {
     "en": "english", "zh": "chinese", "de": "german", "es": "spanish",
@@ -82,9 +106,43 @@ LANGUAGE_NAMES: Dict[str, str] = {
 @dataclass(frozen=True)
 class PersistedSettings:
     language: str = AUTO
+    model_kind: str = MODEL_KIND_LOCAL
+    api_endpoint: str = ""
+    api_key: str = ""
+    api_model_id: str = ""
 
     def is_valid(self) -> bool:
-        return self.language == AUTO or self.language in SUPPORTED_ISO_639_1
+        if self.language != AUTO and self.language not in SUPPORTED_ISO_639_1:
+            return False
+        if self.model_kind not in MODEL_KINDS:
+            return False
+        if self.model_kind == MODEL_KIND_API:
+            if not endpoint_scheme_ok(normalize_endpoint(self.api_endpoint)):
+                return False
+            if not self.api_key:
+                return False
+            if not self.api_model_id:
+                return False
+        return True
+
+
+def normalize_endpoint(endpoint: str) -> str:
+    """Return ``endpoint`` with surrounding whitespace and trailing ``/`` stripped.
+
+    Returns an empty string for a falsy input. The result is the canonical
+    form stored on disk and used as the base of every request URL the
+    ASR builder, the modal validator, and the menu label compose.
+    """
+    if not endpoint:
+        return ""
+    return endpoint.strip().rstrip("/")
+
+
+def endpoint_scheme_ok(endpoint: str) -> bool:
+    """``True`` if ``endpoint`` is non-empty and starts with ``http://`` or ``https://``."""
+    if not endpoint:
+        return False
+    return endpoint.startswith("http://") or endpoint.startswith("https://")
 
 
 def config_path() -> Path:
@@ -161,12 +219,15 @@ def _read(path: Path) -> Optional[PersistedSettings]:
     * the file is missing (treated as the legitimate first-run case),
     * the file is unreadable (OS-level error),
     * the file is malformed (JSON syntax / non-object / non-string
-      language field / unsupported code).
+      language field / unsupported code / out-of-range model_kind).
 
     In every non-missing case :func:`_read` logs a warning so the user
     can find out from the log why defaults are being used. The caller
     (:func:`load`) is responsible for distinguishing the missing case
     from the corrupt-but-present case before any rewrite of the file.
+
+    v1 files (no ``model_kind``) load as ``model_kind="local"`` with
+    empty API fields — language is preserved untouched.
     """
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -192,6 +253,7 @@ def _read(path: Path) -> Optional[PersistedSettings]:
             path,
         )
         return None
+
     language = data.get("language")
     if not isinstance(language, str):
         logger.warning(
@@ -200,13 +262,46 @@ def _read(path: Path) -> Optional[PersistedSettings]:
             path,
         )
         return None
-    settings = PersistedSettings(language=language)
-    if not settings.is_valid():
+
+    model_kind = data.get("model_kind", MODEL_KIND_LOCAL)
+    if not isinstance(model_kind, str) or model_kind not in MODEL_KINDS:
         logger.warning(
-            "config %s has unsupported language %r; leaving file "
+            "config %s has unsupported model_kind %r; leaving file "
             "intact and falling back to defaults",
             path,
-            language,
+            model_kind,
+        )
+        return None
+
+    raw_endpoint = data.get("api_endpoint", "")
+    raw_key = data.get("api_key", "")
+    raw_model_id = data.get("api_model_id", "")
+    if (
+        not isinstance(raw_endpoint, str)
+        or not isinstance(raw_key, str)
+        or not isinstance(raw_model_id, str)
+    ):
+        logger.warning(
+            "config %s has non-string API field(s); leaving file "
+            "intact and falling back to defaults",
+            path,
+        )
+        return None
+
+    settings = PersistedSettings(
+        language=language,
+        model_kind=model_kind,
+        api_endpoint=raw_endpoint,
+        api_key=raw_key,
+        api_model_id=raw_model_id,
+    )
+    if not settings.is_valid():
+        logger.warning(
+            "config %s is structurally valid but fails business rules "
+            "(model_kind=%r); leaving file intact and falling back to "
+            "defaults",
+            path,
+            settings.model_kind,
         )
         return None
     return settings
@@ -224,10 +319,10 @@ def load() -> PersistedSettings:
        → return a fresh in-memory :class:`PersistedSettings`
        resolved via :func:`resolve_initial_language`. **The corrupt
        file on disk is left untouched** so the user can repair it by
-       hand — see AGENTS.md Phase 15 acceptance criteria.
+       hand.
     3. If the file does not exist (true first run)
-       → resolve the initial language, write it to disk (atomic,
-       ``0o600``), and return it.
+       → resolve the initial language, write a fresh v2 file to disk
+       (atomic, ``0o600``), and return it.
 
     Never raises.
     """
@@ -253,16 +348,28 @@ def load() -> PersistedSettings:
 def save(settings: PersistedSettings) -> None:
     """Atomically write ``settings`` to the config file.
 
-    Writes to a sibling ``.tmp`` file first (``0o600``), then
-    ``os.replace`` on the same filesystem. POSIX guarantees the rename
-    is atomic; readers will see either the old or the new file, never
-    a half-written one.
+    Canonicalises ``api_endpoint`` via :func:`normalize_endpoint`
+    before writing so on-disk values never carry a stray trailing ``/``
+    or surrounding whitespace. Writes to a sibling ``.tmp`` file
+    first (``0o600``), then ``os.replace`` on the same filesystem.
+    POSIX guarantees the rename is atomic; readers will see either
+    the old or the new file, never a half-written one.
+
+    The API key is never logged: only the endpoint, language and
+    model kind reach the logger.
     """
     if not settings.is_valid():
-        raise ValueError(f"unsupported language: {settings.language!r}")
+        raise ValueError(
+            f"invalid settings: language={settings.language!r}, "
+            f"model_kind={settings.model_kind!r}"
+        )
+
+    canonical = replace(
+        settings, api_endpoint=normalize_endpoint(settings.api_endpoint)
+    )
 
     path = config_path()
-    payload = {"_v": SCHEMA_VERSION, **asdict(settings)}
+    payload = {"_v": SCHEMA_VERSION, **asdict(canonical)}
     tmp = path.with_suffix(path.suffix + ".tmp")
 
     fd = os.open(
@@ -282,7 +389,13 @@ def save(settings: PersistedSettings) -> None:
         raise
 
     os.replace(tmp, path)
-    logger.debug("config saved: language=%s -> %s", settings.language, path)
+    logger.debug(
+        "config saved: language=%s, model_kind=%s, endpoint=%s -> %s",
+        canonical.language,
+        canonical.model_kind,
+        canonical.api_endpoint or "(none)",
+        path,
+    )
 
 
 def menu_items() -> list[tuple[str, str]]:

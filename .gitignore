@@ -30,3 +30,7 @@ assets/_py2app/
 
 # Hugging Face cache (downloaded at runtime)
 ~/.cache/huggingface/
+
+# Release artifacts — uploaded to GitHub Releases, never committed
+DictateMac-*.zip
+DictateMac-*.zip.sha256

@@ -46,8 +46,13 @@ from typing import Optional
 import numpy as np
 
 from dictate_mac.audio import Recorder, trim_silence
+from dictate_mac.config import (
+    MODEL_KIND_API,
+    MODEL_KIND_LOCAL,
+)
 from dictate_mac.hotkey import HotkeyEdge, HotkeyEvent, HotkeyWatcher
 from dictate_mac.transcriber import (
+    DEFAULT_API_TIMEOUT,
     ensure_warm_async,
     is_model_cached,
     transcribe as asr_transcribe,
@@ -76,6 +81,11 @@ class Settings:
     output_backend: str = "quartz"
     per_char_delay_ms: int = 8
     language: str = "auto"
+    model_kind: str = MODEL_KIND_LOCAL
+    api_endpoint: str = ""
+    api_key: str = ""
+    api_model_id: str = ""
+    api_timeout: float = DEFAULT_API_TIMEOUT
 
 
 def _play(sound_path: str) -> None:
@@ -190,8 +200,22 @@ class DictationMachine:
         Bridges the cross-thread warmup callback into the asyncio loop
         via ``loop.call_soon_threadsafe`` so we can publish state
         transitions on the pump thread.
+
+        In API mode there is no local model to load — the warmup
+        thread is skipped entirely (no cache check, no download,
+        no in-process import). The state machine still arms the
+        hotkey and becomes ``READY`` so the menu bar can update.
         """
         loop = asyncio.get_running_loop()
+
+        if self._settings.model_kind == MODEL_KIND_API:
+            logger.info("[warmup] api mode — skipping local model load")
+            await self._publish_state(
+                State.READY,
+                "[warmup] api mode, local model not loaded",
+            )
+            self._warmup_done.set()
+            return
 
         if is_model_cached():
             await self._publish_state(
@@ -340,9 +364,31 @@ class DictationMachine:
 
         await self._publish_state(State.TRANSCRIBING, "[asr] transcribing …")
         t0 = time.perf_counter()
-        text = await asyncio.to_thread(
-            asr_transcribe, trimmed, self._settings.language
-        )
+        try:
+            if self._settings.model_kind == MODEL_KIND_API:
+                text = await asyncio.to_thread(
+                    asr_transcribe,
+                    trimmed,
+                    self._settings.language,
+                    model_kind=MODEL_KIND_API,
+                    api_endpoint=self._settings.api_endpoint,
+                    api_key=self._settings.api_key,
+                    api_model_id=self._settings.api_model_id,
+                    api_timeout=self._settings.api_timeout,
+                )
+            else:
+                text = await asyncio.to_thread(
+                    asr_transcribe, trimmed, self._settings.language
+                )
+        except RuntimeError as exc:
+            dt = time.perf_counter() - t0
+            logger.warning(
+                "[asr] api back-end failed after %.2fs: %s — typing nothing",
+                dt,
+                exc,
+            )
+            await self._publish_state(State.READY, "[idle] ready")
+            return
         dt = time.perf_counter() - t0
         if not text:
             logger.info("[asr] empty result — typing nothing (took %.2fs)", dt)
