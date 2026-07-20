@@ -61,7 +61,9 @@ catches the leak at commit time rather than after a public release.
 backends selected at runtime:
 
 - The user presses **Right Option** to start recording and presses it
-  again to stop.
+  again to stop. Pressing **Esc** while recording cancels it: the
+  buffer is discarded, the *Pop* end sound plays, nothing is
+  transcribed or typed.
 - Audio is captured at 16 kHz mono, trimmed with `silero-vad`, and
   transcribed with one of:
   - **Local** — `mlx-whisper` (`mlx-community/whisper-large-v3-turbo`)
@@ -108,7 +110,7 @@ dictate-mac/
 │       │   └── timing.py   # raises — we never call add_word_timestamps
 │       └── torchaudio/     # Python stub used by the silero-vad path
 ├── src/dictate_mac/
-│   ├── __init__.py         # __version__ (currently 0.3.0)
+│   ├── __init__.py         # __version__ (currently 0.4.0)
 │   ├── __main__.py         # python -m dictate_mac
 │   ├── cli.py              # argparse + daemon / warmup / selftest / menubar
 │   ├── audio.py            # Recorder + silero-vad trim_silence
@@ -138,7 +140,7 @@ reach across module boundaries — use the public surface listed.
 | `audio.py`                | mic capture + VAD trimming                                    | `Recorder`, `AudioConfig`, `trim_silence`, `has_speech`                |
 | `transcriber.py`          | ASR backends: local mlx-whisper + OpenAI-compatible API       | `transcribe(audio, language, *, model_kind, api_*)`, `check_api_model_available`, `ensure_warm_async`, `warm`, `is_model_cached`, `model_loaded`, `_audio_to_wav_bytes` |
 | `typer.py`                | keystroke injection into focused window                       | `type_text(text, backend, per_char_delay_ms)`, `type_text_quartz`, `type_text_osascript` |
-| `hotkey.py`               | global Right Option watcher                                   | `HotkeyWatcher(output_queue)`, `HotkeyEdge`, `HotkeyEvent`              |
+| `hotkey.py`               | global Right Option watcher (+ Esc cancel)                    | `HotkeyWatcher(output_queue)`, `HotkeyEdge`, `HotkeyEvent`              |
 | `state.py`                | orchestrates the loop: warm → arm → record → transcribe → type | `DictationMachine`, `Settings`, `State`, `SOUND_START`, `SOUND_END`     |
 | `config.py`               | persisted settings (language + ASR backend + API credentials) | `AUTO`, `SUPPORTED_ISO_639_1`, `MODEL_KINDS`, `MODEL_KIND_LOCAL`, `MODEL_KIND_API`, `menu_items`, `display_name`, `load`, `save`, `PersistedSettings`, `normalize_endpoint`, `endpoint_scheme_ok`, `detect_system_primary_language` |
 | `menubar.py`              | NSStatusItem + Model/language submenus                        | `run_menubar(settings)`, `MenubarApp`                                   |
@@ -187,6 +189,7 @@ STARTING → DOWNLOADING_MODEL (first run only)
          → LOADING_MODEL
          → READY  (hotkey armed)
                 ⇄ RECORDING → TRANSCRIBING → TYPING → READY
+                RECORDING --Esc--> READY (buffer discarded, no ASR)
 ERROR — terminal; hotkey disarmed
 ```
 
@@ -268,6 +271,22 @@ the reason is still valid after you check the source.
   avoid hallucinated text and to honour "type nothing if no speech".
   In the bundled `.app` the runtime path is a numpy+onnxruntime stub
   under `assets/_bundling/silero_vad/`.
+- **PortAudio re-init on stale device snapshot.** PortAudio snapshots
+  the audio device list at `Pa_Initialize` (once per process). When
+  the topology changes under a long-running daemon — virtual devices
+  appearing/disappearing (NoMachine-style drivers), a coreaudiod
+  restart, a default-input switch — `Pa_OpenStream` on the stale
+  default device fails with `paInternalError (-9986)` on every
+  recording until the process restarts. `Recorder.start()` catches
+  `sd.PortAudioError` on the first open, calls `sd._terminate()` +
+  `sd._initialize()` to refresh the snapshot, and retries once. Only
+  a second failure propagates to the state machine.
+- **Esc cancels an active recording.** The hotkey tap also forwards
+  plain `kCGEventKeyDown` Esc presses (keycode 0x35, no Cmd/Ctrl/
+  Shift) into the event queue. The state machine honours them only
+  in RECORDING: `Recorder.stop()` closes the stream, the buffer is
+  discarded (no VAD/ASR/typing), the end sound plays, and the
+  machine returns to READY. Esc in any other state is dropped.
 - **Right Option only, with modifier filter.** Rarely used as a system
   shortcut. Presses that also hold Cmd/Ctrl/Shift are ignored so the
   daemon doesn't break system shortcuts. A global macro tool (e.g.
@@ -464,8 +483,8 @@ no supported match maps to `"auto"`.
 
 ## 10. Testing
 
-`dictate-mac selftest [--no-mic]` runs twelve checks; optionally a
-thirteenth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
+`dictate-mac selftest [--no-mic]` runs fourteen checks; optionally a
+fifteenth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 
 1. **model-load** — `mlx_whisper` weights load into RAM.
 2. **vad-silence** — 1 s of zeros → VAD returns `[]`.
@@ -493,7 +512,12 @@ thirteenth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 12. **api-models-check** — mocked `GET /v1/models` handles 200+id,
     200-missing-id, 401, 404 and 500 correctly, and never leaks the
     fake API key string into any error.
-13. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
+13. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
+    open raising `PortAudioError -9986` triggers one
+    `sd._terminate()`/`sd._initialize()` cycle and a successful retry.
+14. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
+    cancel press; Cmd+Esc is filtered out.
+15. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
     report durations.
 
 `dictate-mac warmup --skip-mic-test` is the deterministic "is it

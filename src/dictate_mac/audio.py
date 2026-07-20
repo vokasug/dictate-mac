@@ -71,6 +71,18 @@ class Recorder:
             if self._recording:
                 self._chunks.append(indata.copy().reshape(-1))
 
+    def _open_stream(self) -> sd.InputStream:
+        cfg = self._config
+        stream = sd.InputStream(
+            samplerate=cfg.samplerate,
+            channels=cfg.channels,
+            dtype=cfg.dtype,
+            blocksize=cfg.blocksize,
+            callback=self._callback,
+        )
+        stream.start()
+        return stream
+
     def start(self) -> None:
         if self._recording:
             raise RuntimeError("Recorder already started")
@@ -83,14 +95,29 @@ class Recorder:
         )
         with self._lock:
             self._chunks.clear()
-        self._stream = sd.InputStream(
-            samplerate=cfg.samplerate,
-            channels=cfg.channels,
-            dtype=cfg.dtype,
-            blocksize=cfg.blocksize,
-            callback=self._callback,
-        )
-        self._stream.start()
+        try:
+            self._stream = self._open_stream()
+        except sd.PortAudioError as exc:
+            # PortAudio snapshots the device list at Pa_Initialize. If
+            # the topology changed since (virtual devices appearing or
+            # disappearing, coreaudiod restart, default input switch),
+            # Pa_OpenStream on the stale default fails with
+            # paInternalError (-9986) until the process restarts.
+            # Re-initializing PortAudio refreshes the snapshot, so we
+            # retry once instead of failing every recording.
+            try:
+                default_input = sd.query_devices(kind="input")
+            except Exception:  # noqa: BLE001
+                default_input = "<unavailable>"
+            logger.warning(
+                "input stream open failed (%s); default input now %r — "
+                "re-initializing PortAudio and retrying once",
+                exc,
+                default_input,
+            )
+            sd._terminate()
+            sd._initialize()
+            self._stream = self._open_stream()
         self._recording = True
 
     def stop(self) -> np.ndarray:

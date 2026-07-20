@@ -50,7 +50,12 @@ from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_LOCAL,
 )
-from dictate_mac.hotkey import HotkeyEdge, HotkeyEvent, HotkeyWatcher
+from dictate_mac.hotkey import (
+    K_VK_ESCAPE,
+    HotkeyEdge,
+    HotkeyEvent,
+    HotkeyWatcher,
+)
 from dictate_mac.transcriber import (
     DEFAULT_API_TIMEOUT,
     ensure_warm_async,
@@ -321,12 +326,17 @@ class DictationMachine:
             self.stop()
             return
 
-        # We react only to key-down events.
+        # We react only to key-down events. Esc is a dedicated cancel
+        # key, meaningful only while RECORDING.
         presses = [ev for ev in events if ev.edge == HotkeyEdge.PRESS]
+        option_presses = [ev for ev in presses if ev.keycode != K_VK_ESCAPE]
+        escape_presses = [ev for ev in presses if ev.keycode == K_VK_ESCAPE]
 
-        if self._state == State.READY and presses:
+        if self._state == State.READY and option_presses:
             await self._start_recording()
-        elif self._state == State.RECORDING and presses:
+        elif self._state == State.RECORDING and escape_presses:
+            await self._cancel_recording()
+        elif self._state == State.RECORDING and option_presses:
             await self._stop_and_process()
 
         # Light sleep so we don't spin when no events arrive.
@@ -340,6 +350,16 @@ class DictationMachine:
         except Exception as exc:  # noqa: BLE001
             logger.error("[rec] start failed: %s", exc)
             await self._publish_state(State.READY, "[idle] ready")
+
+    async def _cancel_recording(self) -> None:
+        assert self._state == State.RECORDING
+        try:
+            self._recorder.stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[rec] stop failed during cancel: %s", exc)
+        threading.Thread(target=_play, args=(SOUND_END,), daemon=True).start()
+        logger.info("[rec] cancelled via Esc")
+        await self._publish_state(State.READY, "[idle] ready")
 
     async def _stop_and_process(self) -> None:
         assert self._state == State.RECORDING

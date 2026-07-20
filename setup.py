@@ -1518,6 +1518,9 @@ def main() -> None:
         )
         sys.exit(1)
 
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    from dictate_mac import __version__ as APP_VERSION
+
     data_files, resources = _stage_runtime_files()
 
     OPTIONS = {
@@ -1528,8 +1531,8 @@ def main() -> None:
             "CFBundleName": "DictateMac",
             "CFBundleDisplayName": "Dictate Mac",
             "CFBundleIdentifier": "com.local.dictate-mac",
-            "CFBundleShortVersionString": "0.2.0",
-            "CFBundleVersion": "0.2.0",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
             "LSMinimumSystemVersion": "11.0",
             "LSUIElement": True,
             "NSHighResolutionCapable": True,

@@ -70,14 +70,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.3.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.3.0-macos.zip)
+[`DictateMac-v0.4.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.4.0-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
 Compressed download is ~110–140 MB; the extracted `.app` is ~284 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.3.0-macos.zip
+shasum -a 256 DictateMac-v0.4.0-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -86,7 +86,7 @@ shasum -a 256 DictateMac-v0.3.0-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.3.0-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.4.0-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -196,6 +196,7 @@ pass, install_name / signature rewrites) live in
 | **Press Right Option**       | Recording starts (you'll hear a short Ping sound)  |
 | Speak                        | Your voice is captured                             |
 | **Press Right Option again** | Recording stops; recognition runs; text is typed   |
+| **Press Esc while recording**| Recording is cancelled — nothing is recognised or typed |
 
 - **Use the right Option key specifically** — not the left one. If
   Cmd / Ctrl / Shift is held at the same time, the press is ignored
@@ -203,7 +204,8 @@ pass, install_name / signature rewrites) live in
 - **Minimum speech length: 0.3 s** — shorter recordings produce no
   output.
 - **Audio feedback** — Recording start plays *Ping*, recording stop
-  plays *Pop* (instant, before VAD/ASR/typing). Mute in macOS Sound
+  plays *Pop* (instant, before VAD/ASR/typing). Cancelling with Esc
+  also plays *Pop*. Mute in macOS Sound
   settings if you don't want them.
 - **Spacing** — dictate-mac appends a single space after every
   recognised phrase so the next dictation doesn't run into the
@@ -505,13 +507,14 @@ dictate-mac selftest --no-mic   # skip the microphone roundtrip
 If you installed via the `.app` rather than from a venv, the same
 subcommands are reachable via the bundle's executable
 (`/Applications/DictateMac.app/Contents/MacOS/DictateMac selftest`).
-Exit code 0 if all 12 checks pass, 1 otherwise. Each check prints a
+Exit code 0 if all 14 checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail; the checks are
 `model-load`, `vad-silence`, `vad-speech-like`, `asr-smoke`,
 `typer-dispatch`, `config-v1-migration`, `config-invalid-endpoint`,
 `config-api-required-when-api`, `audio-wav-roundtrip`,
 `api-transcribe-headers`, `api-transcribe-auto-language`,
-`api-models-check`, plus an optional `mic-roundtrip`.
+`api-models-check`, `recorder-portaudio-retry`,
+`hotkey-escape-event`, plus an optional `mic-roundtrip`.
 
 **FAQ:**
 

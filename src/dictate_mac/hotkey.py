@@ -35,6 +35,7 @@ logger = logging.getLogger("dictate_mac.hotkey")
 #   0x3D = kVK_RightOption (Right Option) — the spec-mandated trigger.
 K_VK_RIGHT_OPTION = 0x3D
 K_VK_LEFT_OPTION = 0x3A
+K_VK_ESCAPE = 0x35
 K_VK_OPTION_KEYS = (K_VK_RIGHT_OPTION,)
 
 
@@ -294,6 +295,25 @@ class HotkeyWatcher:
             keycode,
             flags,
         )
+
+        if keycode == K_VK_ESCAPE:
+            # Esc is the recording-cancel key. It fires a regular
+            # keyDown (not flagsChanged) and is meaningful to the state
+            # machine only while RECORDING — it is dropped otherwise.
+            # Ignore Esc held together with Cmd/Ctrl/Shift so we don't
+            # shadow system shortcuts.
+            if event_type != kCGEventKeyDown:
+                return
+            if flags & _MASK_BLOCKERS:
+                return
+            logger.debug("escape captured (flags=0x%x)", flags)
+            try:
+                self._output.put_nowait(
+                    HotkeyEvent(edge=HotkeyEdge.PRESS, flags=flags, keycode=keycode)
+                )
+            except queue.Full:
+                logger.warning("hotkey queue full — dropping escape")
+            return
 
         if keycode not in self._keycodes:
             return

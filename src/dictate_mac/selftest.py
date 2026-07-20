@@ -652,6 +652,128 @@ def test_models_endpoint_check_accepts_and_rejects() -> Result:
     )
 
 
+def test_recorder_portaudio_retry() -> Result:
+    """When the first ``sd.InputStream`` open fails with a PortAudioError
+    (stale device snapshot after a topology change), Recorder must
+    re-initialise PortAudio and retry once instead of failing."""
+    import dictate_mac.audio as audio_mod
+
+    calls = {"open": 0, "terminate": 0, "initialize": 0}
+
+    class _FakeStream:
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    real_input_stream = audio_mod.sd.InputStream
+    real_terminate = audio_mod.sd._terminate
+    real_initialize = audio_mod.sd._initialize
+
+    def fake_input_stream(**kwargs):  # noqa: ARG001
+        calls["open"] += 1
+        if calls["open"] == 1:
+            raise audio_mod.sd.PortAudioError("Internal PortAudio error", -9986)
+        return _FakeStream()
+
+    def fake_terminate() -> None:
+        calls["terminate"] += 1
+
+    def fake_initialize() -> None:
+        calls["initialize"] += 1
+
+    try:
+        audio_mod.sd.InputStream = fake_input_stream
+        audio_mod.sd._terminate = fake_terminate
+        audio_mod.sd._initialize = fake_initialize
+        rec = Recorder()
+        rec.start()
+        audio = rec.stop()
+    except Exception as exc:  # noqa: BLE001
+        return Result(
+            "recorder-portaudio-retry",
+            False,
+            f"retry path raised: {exc}",
+        )
+    finally:
+        audio_mod.sd.InputStream = real_input_stream
+        audio_mod.sd._terminate = real_terminate
+        audio_mod.sd._initialize = real_initialize
+
+    if calls["open"] != 2 or calls["terminate"] != 1 or calls["initialize"] != 1:
+        return Result(
+            "recorder-portaudio-retry",
+            False,
+            f"unexpected call pattern: {calls} (expected 2 opens, 1 terminate, 1 initialize)",
+        )
+    if audio.size != 0:
+        return Result(
+            "recorder-portaudio-retry",
+            False,
+            f"expected empty buffer from fake stream, got {audio.size} samples",
+        )
+    return Result(
+        "recorder-portaudio-retry",
+        True,
+        "first open failed with -9986, PortAudio re-initialised, retry succeeded",
+    )
+
+
+def test_hotkey_escape_event() -> Result:
+    """A synthetic Esc keyDown reaches the hotkey queue as a PRESS with
+    keycode 0x35; Esc with Cmd held is filtered out."""
+    import queue as queue_mod
+
+    from Quartz import (
+        CGEventCreateKeyboardEvent,
+        CGEventSetFlags,
+        kCGEventFlagMaskCommand,
+        kCGEventKeyDown,
+    )
+
+    from dictate_mac.hotkey import K_VK_ESCAPE, HotkeyWatcher
+
+    q: queue_mod.Queue = queue_mod.Queue()
+    watcher = HotkeyWatcher(q)
+
+    plain_esc = CGEventCreateKeyboardEvent(None, K_VK_ESCAPE, True)
+    watcher._handle_event(kCGEventKeyDown, plain_esc)
+
+    cmd_esc = CGEventCreateKeyboardEvent(None, K_VK_ESCAPE, True)
+    CGEventSetFlags(cmd_esc, kCGEventFlagMaskCommand)
+    watcher._handle_event(kCGEventKeyDown, cmd_esc)
+
+    events = []
+    while True:
+        try:
+            events.append(q.get_nowait())
+        except queue_mod.Empty:
+            break
+
+    if len(events) != 1:
+        return Result(
+            "hotkey-escape-event",
+            False,
+            f"expected exactly 1 event (plain Esc), got {len(events)}",
+        )
+    ev = events[0]
+    if ev.keycode != K_VK_ESCAPE or ev.edge.value != "press":
+        return Result(
+            "hotkey-escape-event",
+            False,
+            f"unexpected event: {ev!r}",
+        )
+    return Result(
+        "hotkey-escape-event",
+        True,
+        "plain Esc queued as cancel press; Cmd+Esc filtered out",
+    )
+
+
 def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
     tests: List[Callable[[], Result]] = [
         test_model_load,
@@ -666,6 +788,8 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_api_transcribe_sends_model_id_and_bearer,
         test_api_transcribe_omits_language_when_auto,
         test_models_endpoint_check_accepts_and_rejects,
+        test_recorder_portaudio_retry,
+        test_hotkey_escape_event,
     ]
     if with_mic:
         tests.append(lambda: test_mic_roundtrip(language=language))
