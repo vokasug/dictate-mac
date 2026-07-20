@@ -4,15 +4,20 @@
 # Pipeline:
 #   1. Make sure py2app is installed in the active venv.
 #   2. Generate the icon (assets/iconset/*) as a waveform glyph.
-#   3. Run py2app.build_app — produces dist/DictateMac.app.
-#      Post-build hooks in setup.py.main() then run:
-#        - extract native libs out of python313.zip
-#        - rewrite broken LC_RPATHs in torch wheels
-#        - install torchaudio / silero_vad / timing stubs
-#        - strip unused packages, .pyi stubs, native metadata
+#   3. Run setup.py py2app — produces dist/DictateMac.app. setup.py
+#      then runs the full post-build pipeline:
+#        - pre-patch the source venv with the assets/_bundling stubs
+#          (restored afterwards even on failure)
+#        - extract native libs (libportaudio, _sounddevice_data) out
+#          of python313.zip
+#        - install torchaudio / silero_vad / mlx_whisper.timing stubs
+#          into the bundle
+#        - strip unused packages, .pyi stubs, __pycache__, metadata
 #        - rewrite __boot__.py to use RESOURCEPATH
 #        - rewrite PythonExecutable in Info.plist to @executable_path
 #          (removes the developer's venv path from the shipped bundle)
+#        - re-sign the bundle ad-hoc with codesign
+#      See AGENTS.md §6 for the full description.
 #
 # Usage:
 #   ./build.sh           # full rebuild
