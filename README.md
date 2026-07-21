@@ -70,14 +70,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.4.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.4.0-macos.zip)
+[`DictateMac-v0.4.1-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.4.1-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
 Compressed download is ~110–140 MB; the extracted `.app` is ~284 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.4.0-macos.zip
+shasum -a 256 DictateMac-v0.4.1-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -86,7 +86,7 @@ shasum -a 256 DictateMac-v0.4.0-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.4.0-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.4.1-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -271,7 +271,10 @@ Quit
 - `Typing…` — recognised text is being injected keystroke by
   keystroke.
 - `Error: see logs` — something went wrong; the menu and logs
-  describe it; Right Option is disarmed until you quit and relaunch.
+  describe it. A failed model download/load is retryable in place:
+  the menu shows `Model download failed — press Right Option to
+  retry` and the next Right Option press re-runs the warmup. Only
+  permission errors require Quit + reopen.
 
 ## Recognition language
 
@@ -507,14 +510,15 @@ dictate-mac selftest --no-mic   # skip the microphone roundtrip
 If you installed via the `.app` rather than from a venv, the same
 subcommands are reachable via the bundle's executable
 (`/Applications/DictateMac.app/Contents/MacOS/DictateMac selftest`).
-Exit code 0 if all 14 checks pass, 1 otherwise. Each check prints a
+Exit code 0 if all 16 checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail; the checks are
 `model-load`, `vad-silence`, `vad-speech-like`, `asr-smoke`,
-`typer-dispatch`, `config-v1-migration`, `config-invalid-endpoint`,
-`config-api-required-when-api`, `audio-wav-roundtrip`,
-`api-transcribe-headers`, `api-transcribe-auto-language`,
-`api-models-check`, `recorder-portaudio-retry`,
-`hotkey-escape-event`, plus an optional `mic-roundtrip`.
+`typer-dispatch`, `ssl-certifi`, `config-v1-migration`,
+`config-invalid-endpoint`, `config-api-required-when-api`,
+`audio-wav-roundtrip`, `api-transcribe-headers`,
+`api-transcribe-auto-language`, `api-models-check`, `warmup-retry`,
+`recorder-portaudio-retry`, `hotkey-escape-event`, plus an optional
+`mic-roundtrip`.
 
 **FAQ:**
 
@@ -524,6 +528,7 @@ PASS/FAIL line with a one-line detail; the checks are
 | `Status: Error: see logs` after first Right Option press | Microphone not granted | macOS will prompt on first press; if you declined, open System Settings → Privacy & Security → Microphone and toggle dictate-mac on. |
 | Russian text doesn't appear in Citrix | Citrix unicode input disabled | In Citrix Viewer → Preferences → Keyboard, enable **Send Unicode keyboard input** (default in modern versions). Or use `--output=osascript`. |
 | Status stuck on `Starting…` / `Downloading…` | Hugging Face unreachable (local mode), or the bundle can't find embedded Python | `curl -I https://huggingface.co/mlx-community/whisper-large-v3-turbo`. If the model is downloaded but loading still fails, rebuild with `./build.sh --clean`. |
+| `Model download failed — press Right Option to retry` | The first-run download failed (no network, DNS/VPN hiccup, HF outage) | Bring the network up and press **Right Option** — the warmup re-runs without an app restart. Check the log via **Open log** if it keeps failing. |
 | `mlx` fails to install / load | Python 3.14 (no wheel) | Recreate venv: `uv venv --python 3.13 .venv --force && uv pip install -e .` |
 | API mode returns HTTP 429 | The OpenAI-compatible gateway is rate-limiting | Some gateways (e.g. `whisper-large-v3-turbo`) have a 1-request-per-10-15-seconds cap on certain upstream providers. Switch the menu to a different model id, or to Local if the same model is acceptable. |
 | Too much RAM usage | Local backend occupies ~1.5 GB permanently | API mode doesn't load any ASR weights; switch if RAM is tight. |

@@ -479,6 +479,16 @@ def _extract_native_runtime_libs(app_dist: Path) -> None:
         # is at lib/python3.13/onnxruntime/.
         "onnxruntime/": "remove",
         "onnxruntime-": "remove",
+        # certifi ships cacert.pem as a package data file. Inside the
+        # zip, ``certifi.where()`` returns a path that does not exist
+        # on the filesystem, so ``ssl.create_default_context(cafile=
+        # certifi.where())`` — used by httpx (huggingface_hub) and
+        # requests (API backend) — raises FileNotFoundError and every
+        # HTTPS call fails. certifi is listed in OPTIONS['packages']
+        # so py2app mirrors it on disk with cacert.pem; drop the zip
+        # entries so ZipImporter cannot shadow the on-disk copy.
+        "certifi/": "remove",
+        "certifi-": "remove",
         # Heavy transitive wheels that should never be reached now
         # that silero_vad + mlx_whisper.timing are stubbed.
         # Stripping them from the zip keeps ZipImporter from finding
@@ -617,6 +627,50 @@ def _rewrite_boot_script(app_dist: Path) -> None:
             "boot-script rewrite (assumes py2app is portable already)"
         )
         return
+
+    # py2app's ``_setup_openssl`` exports SSL_CERT_FILE / SSL_CERT_DIR
+    # pointing at ``Resources/openssl.ca`` — a directory our
+    # ``_strip_bundle_junk`` removes. httpx (huggingface_hub) honours
+    # SSL_CERT_FILE via trust_env=True and then dies with
+    # ``FileNotFoundError`` on every HTTPS call. Rewrite the helper to
+    # keep openssl.ca when it exists and otherwise fall back to the
+    # bundled certifi cacert.pem (guaranteed on disk — certifi is in
+    # OPTIONS['packages']).
+    openssl_pattern = re.compile(
+        r"def _setup_openssl\(\):.*?\n_setup_openssl\(\)", re.DOTALL
+    )
+    openssl_replacement = (
+        "def _setup_openssl():\n"
+        "    import os, sys\n"
+        "    resourcepath = os.environ['RESOURCEPATH']\n"
+        "    pem = os.path.join(resourcepath, 'openssl.ca', 'cert.pem')\n"
+        "    if os.path.exists(pem):\n"
+        "        os.environ['SSL_CERT_FILE'] = pem\n"
+        "        os.environ['SSL_CERT_DIR'] = os.path.join(\n"
+        "            resourcepath, 'openssl.ca', 'certs')\n"
+        "    else:\n"
+        "        _pyver = 'python{}.{}'.format(*sys.version_info[:2])\n"
+        "        cand = os.path.join(\n"
+        "            resourcepath, 'lib', _pyver, 'certifi', 'cacert.pem')\n"
+        "        if os.path.exists(cand):\n"
+        "            os.environ['SSL_CERT_FILE'] = cand\n"
+        "        else:\n"
+        "            os.environ.pop('SSL_CERT_FILE', None)\n"
+        "        os.environ.pop('SSL_CERT_DIR', None)\n"
+        "_setup_openssl()"
+    )
+    patched, n_openssl = openssl_pattern.subn(openssl_replacement, patched, count=1)
+    if n_openssl:
+        print(
+            "  patched _setup_openssl in __boot__.py to fall back to "
+            "bundled certifi cacert.pem"
+        )
+    else:
+        print(
+            "  WARNING: _setup_openssl block not found in __boot__.py — "
+            "SSL_CERT_FILE may point at the stripped openssl.ca"
+        )
+
     boot.write_text(patched)
     print("  patched __boot__.py to use RESOURCEPATH for both "
           "lib/pythonX.Y and lib/ (catches _sounddevice_data)")
@@ -1564,6 +1618,10 @@ def main() -> None:
             # this entry py2app misses the C extension binary in
             # python313.zip and the stub fails at first inference.
             "onnxruntime",
+            # certifi must be an on-disk package (with cacert.pem) —
+            # ssl can only load CA bundles from the filesystem. See
+            # the matching zip-removal in _extract_native_runtime_libs.
+            "certifi",
             # numpy and scipy are kept as directories because the
             # zip-import path breaks their relative-import story.
             # Post-build, scipy.optimize is stripped (it transitively

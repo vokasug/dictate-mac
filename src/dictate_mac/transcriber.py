@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import threading
 import time
 import wave
@@ -48,6 +49,48 @@ from dictate_mac.config import (
 )
 
 logger = logging.getLogger("dictate_mac.transcriber")
+
+
+def _repair_ssl_cert_env() -> None:
+    """Re-point broken ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` variables.
+
+    py2app's ``__boot__.py`` exports both pointing at
+    ``Resources/openssl.ca``, a directory the bundle strip removes.
+    httpx honours ``SSL_CERT_FILE`` (``trust_env=True`` by default) and
+    then raises ``FileNotFoundError`` on every HTTPS call — the Hugging
+    Face model download included. When a variable points at a missing
+    path, re-point it at certifi's ``cacert.pem`` (bundled on disk) or
+    drop it so the default trust store is used. No-op outside the
+    bundle where the variables are normally unset.
+    """
+    pem_env = os.environ.get("SSL_CERT_FILE")
+    dir_env = os.environ.get("SSL_CERT_DIR")
+    pem_ok = bool(pem_env) and os.path.isfile(pem_env)
+    dir_ok = bool(dir_env) and os.path.isdir(dir_env)
+    if pem_ok and (dir_ok or not dir_env):
+        return
+    fallback = ""
+    try:
+        import certifi
+
+        candidate = certifi.where()
+        if candidate and os.path.isfile(candidate):
+            fallback = candidate
+    except Exception:  # noqa: BLE001 — certifi missing: drop below
+        pass
+    if not pem_ok:
+        if fallback:
+            logger.info(
+                "SSL_CERT_FILE pointed at a missing file — using %s", fallback
+            )
+            os.environ["SSL_CERT_FILE"] = fallback
+        else:
+            os.environ.pop("SSL_CERT_FILE", None)
+    if not dir_ok:
+        os.environ.pop("SSL_CERT_DIR", None)
+
+
+_repair_ssl_cert_env()
 
 MODEL_REPO = "mlx-community/whisper-large-v3-turbo"
 TASK = "transcribe"

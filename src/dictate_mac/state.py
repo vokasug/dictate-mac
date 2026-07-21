@@ -13,7 +13,9 @@ Lifecycle:
                   ├── audio ready         ──►  TYPING
                   └── done                ──►  READY
 
-    ERROR     ── terminal until process exit. Hotkey NOT armed.
+    ERROR     ── warmup failure is RETRYABLE (hotkey stays armed, a
+                 Right Option press re-runs the warmup); hotkey-permission
+                 failure is terminal until process exit.
 
 The state machine is the only thing allowed to call ``Recorder.start`` /
 ``stop`` and to invoke ``transcriber.transcribe`` + ``typer.type_text``.
@@ -130,6 +132,15 @@ class DictationMachine:
         self._stopping = threading.Event()
         self._warmup_done = threading.Event()
         self._warmup_error: Optional[str] = None
+        # True after a failed warmup attempt. The ERROR state is then
+        # retryable: the hotkey watcher stays armed and a Right Option
+        # press re-runs the warmup (first launch without network,
+        # transient HF outage, …).
+        self._warmup_failed = False
+        # Set once the hotkey watcher thread has been started. Drives
+        # the dead-tap detection in _pump_once (works in every state,
+        # including the retryable ERROR state).
+        self._watcher_started = False
 
     # -- public API -------------------------------------------------------
 
@@ -144,9 +155,10 @@ class DictationMachine:
             return self._state_value
 
     @property
-    def is_armed(self) -> bool:
-        """True when the hotkey watcher is (or should be) running."""
-        return self.state in (State.READY, State.RECORDING, State.TRANSCRIBING, State.TYPING)
+    def warmup_failed(self) -> bool:
+        """True when the last warmup attempt failed and the machine is
+        sitting in the retryable ERROR state (Right Option retries)."""
+        return self._warmup_failed
 
     async def run(self) -> None:
         """Run the warmup → arm → pump loop until ``stop()`` is called."""
@@ -155,29 +167,27 @@ class DictationMachine:
         await self._warmup()
         # After warmup:
         #   * success → state is LOADING_MODEL / DOWNLOADING_MODEL
-        #   * failure → state is ERROR
+        #   * failure → state is ERROR, but RETRYABLE: the watcher is
+        #     armed anyway and a Right Option press re-runs the warmup.
 
-        if self.state == State.ERROR:
-            # Warmup failed. Skip arming; the pump loop still runs so
-            # the menu bar can keep updating and Quit still works.
-            pass
+        try:
+            self._watcher.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[hotkey] failed to start: %s", exc)
+            await self._publish_state(
+                State.ERROR,
+                f"[hotkey] {exc} (grant Accessibility/Input Monitoring)",
+            )
         else:
-            try:
-                self._watcher.start()
-            except Exception as exc:  # noqa: BLE001
-                logger.error("[hotkey] failed to start: %s", exc)
-                await self._publish_state(
-                    State.ERROR,
-                    f"[hotkey] {exc} (grant Accessibility/Input Monitoring)",
-                )
-            else:
+            self._watcher_started = True
+            if not self._warmup_failed:
                 await self._publish_state(State.READY, "[hotkey] ready")
-                logger.info(
-                    "[hint] if Right Option presses do nothing, grant both "
-                    "Accessibility AND Input Monitoring (macOS 14+) to "
-                    "com.local.dictate-mac in System Settings → "
-                    "Privacy & Security"
-                )
+            logger.info(
+                "[hint] if Right Option presses do nothing, grant both "
+                "Accessibility AND Input Monitoring (macOS 14+) to "
+                "com.local.dictate-mac in System Settings → "
+                "Privacy & Security"
+            )
 
         try:
             while not self._stopping.is_set():
@@ -248,10 +258,11 @@ class DictationMachine:
             await asyncio.sleep(0.05)
 
         if self._warmup_error is not None:
+            self._warmup_failed = True
             await self._publish_state(
                 State.ERROR,
-                f"[warmup] failed: {self._warmup_error} — see logs; "
-                "Right Option is disarmed",
+                f"[warmup] failed: {self._warmup_error} — press Right "
+                "Option to retry (see logs)",
             )
 
     def _handle_warmup_phase(self, phase: str, detail: str) -> None:
@@ -286,23 +297,26 @@ class DictationMachine:
         else:  # pragma: no cover — defensive
             logger.warning("unknown warmup phase: %r", phase)
 
+    async def _retry_warmup(self) -> None:
+        """Re-run the warmup after a previous failure.
+
+        Triggered by a Right Option press while the machine sits in the
+        retryable ERROR state (warmup failed, watcher still armed).
+        ``ensure_warm_async`` starts a fresh background thread because
+        the previous one exited with the failure.
+        """
+        assert self._state == State.ERROR and self._warmup_failed
+        logger.info("[warmup] retry requested via Right Option")
+        self._warmup_failed = False
+        self._warmup_error = None
+        self._warmup_done.clear()
+        await self._warmup()
+        if not self._warmup_failed and not self._stopping.is_set():
+            await self._publish_state(State.READY, "[hotkey] ready")
+
     # -- state machine ----------------------------------------------------
 
     async def _pump_once(self) -> None:
-        # If the tap thread died (callback crash, CFRunLoop exited
-        # unexpectedly) AFTER we successfully armed the hotkey, surface
-        # the failure and exit instead of silently waiting for events
-        # that will never arrive. Before warmup completes the watcher
-        # has not been started yet, so is_alive() is False but that's
-        # not an error.
-        if self.is_armed and not self._watcher.is_alive():
-            logger.error(
-                "[hotkey] tap thread is gone — daemon cannot receive "
-                "Right Option presses anymore, exiting"
-            )
-            self.stop()
-            return
-
         # Drain hotkey queue (non-blocking) into a local buffer.
         events: list[HotkeyEvent] = []
         while True:
@@ -313,6 +327,9 @@ class DictationMachine:
             events.append(ev)
 
         # Sentinel events from the watcher when permission failed.
+        # Checked BEFORE the dead-tap detection below so the user gets
+        # the actionable "grant Accessibility / Input Monitoring"
+        # message instead of a generic "tap thread is gone".
         if any(ev.flags == -1 for ev in events):
             logger.error(
                 "[hotkey] permission denied — grant Accessibility / "
@@ -326,6 +343,18 @@ class DictationMachine:
             self.stop()
             return
 
+        # If the tap thread died (callback crash, CFRunLoop exited
+        # unexpectedly) after being started, surface the failure and
+        # exit instead of silently waiting for events that will never
+        # arrive.
+        if self._watcher_started and not self._watcher.is_alive():
+            logger.error(
+                "[hotkey] tap thread is gone — daemon cannot receive "
+                "Right Option presses anymore, exiting"
+            )
+            self.stop()
+            return
+
         # We react only to key-down events. Esc is a dedicated cancel
         # key, meaningful only while RECORDING.
         presses = [ev for ev in events if ev.edge == HotkeyEdge.PRESS]
@@ -334,6 +363,12 @@ class DictationMachine:
 
         if self._state == State.READY and option_presses:
             await self._start_recording()
+        elif (
+            self._state == State.ERROR
+            and self._warmup_failed
+            and option_presses
+        ):
+            await self._retry_warmup()
         elif self._state == State.RECORDING and escape_presses:
             await self._cancel_recording()
         elif self._state == State.RECORDING and option_presses:

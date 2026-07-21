@@ -110,7 +110,7 @@ dictate-mac/
 │       │   └── timing.py   # raises — we never call add_word_timestamps
 │       └── torchaudio/     # Python stub used by the silero-vad path
 ├── src/dictate_mac/
-│   ├── __init__.py         # __version__ (currently 0.4.0)
+│   ├── __init__.py         # __version__ (currently 0.4.1)
 │   ├── __main__.py         # python -m dictate_mac
 │   ├── cli.py              # argparse + daemon / warmup / selftest / menubar
 │   ├── audio.py            # Recorder + silero-vad trim_silence
@@ -190,7 +190,10 @@ STARTING → DOWNLOADING_MODEL (first run only)
          → READY  (hotkey armed)
                 ⇄ RECORDING → TRANSCRIBING → TYPING → READY
                 RECORDING --Esc--> READY (buffer discarded, no ASR)
-ERROR — terminal; hotkey disarmed
+ERROR (warmup failed) — retryable: hotkey stays armed, a Right
+    Option press re-runs the warmup (menu shows "Model download
+    failed — press Right Option to retry")
+ERROR (hotkey permission denied) — terminal; process exits
 ```
 
 System sounds (best-effort via detached `afplay` threads):
@@ -251,6 +254,31 @@ the reason is still valid after you check the source.
   `mlx_whisper.load_models`. ~1.5 GB of RAM is never allocated. The
   hotkey watcher still arms normally so the daemon stays
   responsive.
+- **Warmup failure is retryable, not terminal.** When the local-model
+  download/load raises (no network on first launch, HF outage,
+  …), the state machine publishes ERROR but still arms the hotkey
+  watcher; the next Right Option press calls `_retry_warmup`, which
+  resets the warmup flags and re-runs `ensure_warm_async` (the dead
+  thread is replaced). On success the machine publishes READY. Only
+  the hotkey-permission ERROR remains terminal. Dead-tap detection
+  keys off `_watcher_started` rather than the armed states so it
+  also fires inside the retryable ERROR state.
+- **certifi ships as an on-disk package, and `SSL_CERT_FILE` is
+  repaired twice.** `ssl.create_default_context(cafile=...)` reads
+  from the filesystem only; a zip-bundled certifi makes
+  `certifi.where()` point into `python313.zip` and every HTTPS call
+  (HF download via httpx, API backend via requests) dies with
+  `FileNotFoundError`. Three layers keep HTTPS working in the
+  bundle: (1) `certifi` is in `OPTIONS['packages']` and its zip
+  entries are removed in `_extract_native_runtime_libs`, so
+  `cacert.pem` sits at `lib/python3.13/certifi/cacert.pem`; (2)
+  `_rewrite_boot_script` rewrites py2app's `_setup_openssl` so
+  `SSL_CERT_FILE`/`SSL_CERT_DIR` fall back to the bundled
+  `cacert.pem` instead of the stripped `Resources/openssl.ca`;
+  (3) `transcriber._repair_ssl_cert_env()` runs at import time and
+  re-points any still-broken variable at `certifi.where()`. The
+  `ssl-certifi` selftest check covers all three paths (env vars,
+  `certifi.where()`, `httpx.Client()` construction).
 - **Hidden Edit menu for ⌘C / ⌘V in modal text fields.** A menubar
   app is `LSUIElement=True` and has no visible menu bar, so without
   intervention `⌘V` in a modal text field triggers the system
@@ -358,7 +386,9 @@ the reason is still valid after you check the source.
    build failure).
 6. Run post-build steps on `dist/DictateMac.app`:
    - `_extract_native_runtime_libs` — rewrite `python313.zip` so
-     `dlopen` can find `libportaudio.dylib` and `_sounddevice_data`.
+     `dlopen` can find `libportaudio.dylib` and `_sounddevice_data`;
+     also removes the zip copies of `certifi` so the on-disk package
+     (with `cacert.pem`) is the only one importable.
    - `_install_torchaudio_stub` — wipe bundled `torchaudio/` and
      write a Python stub (no `libtorchaudio.abi3.so`). The real
      torchaudio wheel's `libtorchaudio` has an `install_name` chain
@@ -384,7 +414,10 @@ the reason is still valid after you check the source.
      duplicate `mlx.metallib`/`libmlx.dylib`/`libjaccl.dylib`.
     - `_rewrite_boot_script` — replace the build-time venv path in
       `__boot__.py` with `os.environ['RESOURCEPATH']` so the bundle
-      uses its embedded Python framework.
+      uses its embedded Python framework. Also rewrites py2app's
+      `_setup_openssl` so `SSL_CERT_FILE`/`SSL_CERT_DIR` fall back to
+      the bundled `certifi/cacert.pem` when `Resources/openssl.ca`
+      has been stripped.
      - `_strip_info_plist_paths` — rewrite
        `Info.plist`'s `PythonInfoDict.PythonExecutable` from the
        developer's build-time venv path to
@@ -483,8 +516,8 @@ no supported match maps to `"auto"`.
 
 ## 10. Testing
 
-`dictate-mac selftest [--no-mic]` runs fourteen checks; optionally a
-fifteenth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
+`dictate-mac selftest [--no-mic]` runs sixteen checks; optionally a
+seventeenth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 
 1. **model-load** — `mlx_whisper` weights load into RAM.
 2. **vad-silence** — 1 s of zeros → VAD returns `[]`.
@@ -493,31 +526,39 @@ fifteenth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 4. **asr-smoke** — `transcribe()` returns a string of any length.
 5. **typer-dispatch** — the `type_text` router picks `quartz` / `osascript`
    / default correctly **without** injecting real keystrokes.
-6. **config-v1-migration** — a v1 `config.json` loads as
+6. **ssl-certifi** — `SSL_CERT_FILE`/`SSL_CERT_DIR` (when set) point at
+   real paths, `certifi.where()` is a real file,
+   `ssl.create_default_context(cafile=…)` works, and `httpx.Client()`
+   (the trust_env path huggingface_hub uses) constructs cleanly.
+   Guards the .app HTTPS packaging (HF download + API backend).
+7. **config-v1-migration** — a v1 `config.json` loads as
    `model_kind="local"` with empty API fields and the persisted
    language preserved.
-7. **config-invalid-endpoint** — malformed endpoints (`ftp://…`,
+8. **config-invalid-endpoint** — malformed endpoints (`ftp://…`,
    bare host, etc.) are rejected by `PersistedSettings.is_valid`.
-8. **config-api-required-when-api** — `model_kind="local"` accepts
+9. **config-api-required-when-api** — `model_kind="local"` accepts
    empty API fields; `model_kind="api"` rejects partial ones.
-9. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
-   amplitude preserved to within one LSB.
-10. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
+10. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
+    amplitude preserved to within one LSB.
+11. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
     confirms the URL, multipart `model` field, `Authorization:
     Bearer` header and (when configured) `language` field are all
     wired correctly.
-11. **api-transcribe-auto-language** — when `language="auto"`, the
+12. **api-transcribe-auto-language** — when `language="auto"`, the
     `language` field is omitted from the form so the gateway falls
     back to its own detection.
-12. **api-models-check** — mocked `GET /v1/models` handles 200+id,
+13. **api-models-check** — mocked `GET /v1/models` handles 200+id,
     200-missing-id, 401, 404 and 500 correctly, and never leaks the
     fake API key string into any error.
-13. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
+14. **warmup-retry** — a simulated warmup failure publishes a
+    retryable ERROR with the hotkey watcher still armed; a synthetic
+    Right Option press re-runs the warmup into READY.
+15. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
     open raising `PortAudioError -9986` triggers one
     `sd._terminate()`/`sd._initialize()` cycle and a successful retry.
-14. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
+16. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
     cancel press; Cmd+Esc is filtered out.
-15. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
+17. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
     report durations.
 
 `dictate-mac warmup --skip-mic-test` is the deterministic "is it

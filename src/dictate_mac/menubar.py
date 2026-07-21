@@ -685,7 +685,10 @@ class MenubarApp(rumps.App):
             logger.debug("status refresh: %s", exc)
             state = None
         if state is not None:
-            label = _STATUS_LABELS.get(state, state.value)
+            if state == State.ERROR and self._machine.warmup_failed:
+                label = "Model download failed — press Right Option to retry"
+            else:
+                label = _STATUS_LABELS.get(state, state.value)
             new_title = f"Status: {label}"
             if self._status_item.title != new_title:
                 self._status_item.title = new_title

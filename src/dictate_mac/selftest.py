@@ -231,6 +231,61 @@ def test_mic_roundtrip(seconds: float = 1.5, language: str = "auto") -> Result:
     )
 
 
+def test_ssl_certifi_on_disk() -> Result:
+    """certifi's CA bundle must be a real file on the filesystem.
+
+    ``ssl.create_default_context(cafile=certifi.where())`` — used by
+    httpx (huggingface_hub model download) and requests (API backend)
+    — can only read from disk. In a py2app bundle where certifi lives
+    inside python313.zip, ``certifi.where()`` returns a non-existent
+    path and every HTTPS call dies with ``FileNotFoundError``. This
+    check catches that packaging regression.
+    """
+    import os
+    import ssl
+
+    import certifi
+
+    for var in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+        val = os.environ.get(var)
+        if val and not Path(val).exists():
+            return Result(
+                "ssl-certifi",
+                False,
+                f"{var}={val!r} points at a non-existent path "
+                "(httpx trust_env would fail every HTTPS call)",
+            )
+
+    pem = certifi.where()
+    if not pem or not Path(pem).is_file():
+        return Result(
+            "ssl-certifi",
+            False,
+            f"certifi.where() -> {pem!r} is not a real file on disk "
+            "(HTTPS would fail with FileNotFoundError)",
+        )
+    try:
+        ssl.create_default_context(cafile=pem)
+    except Exception as exc:  # noqa: BLE001
+        return Result(
+            "ssl-certifi",
+            False,
+            f"ssl.create_default_context(cafile={pem!r}) raised: {exc}",
+        )
+    try:
+        import httpx
+
+        httpx.Client()
+    except Exception as exc:  # noqa: BLE001
+        return Result(
+            "ssl-certifi",
+            False,
+            f"httpx.Client() (trust_env path used by huggingface_hub) "
+            f"raised: {exc}",
+        )
+    return Result("ssl-certifi", True, f"CA bundle readable at {pem}")
+
+
 def test_config_v1_migration_keeps_language() -> Result:
     """A v1 config.json (no model_kind) loads as model_kind='local' with
     empty API fields and the persisted language preserved."""
@@ -652,6 +707,107 @@ def test_models_endpoint_check_accepts_and_rejects() -> Result:
     )
 
 
+def test_warmup_failure_retryable() -> Result:
+    """A failed warmup must not be terminal: the machine publishes a
+    retryable ERROR with the hotkey watcher still armed, and the next
+    Right Option press re-runs the warmup into READY."""
+    import asyncio
+
+    import dictate_mac.state as state_mod
+    from dictate_mac.hotkey import HotkeyEdge, HotkeyEvent
+    from dictate_mac.state import DictationMachine, Settings, State
+
+    calls = {"warm": 0}
+
+    def fake_is_cached() -> bool:
+        return True
+
+    def fake_ensure_warm(on_phase=None):
+        calls["warm"] += 1
+        if on_phase is not None:
+            if calls["warm"] == 1:
+                on_phase("error", "simulated warmup failure")
+            else:
+                on_phase("ready", "")
+
+        class _Thread:
+            def is_alive(self) -> bool:
+                return False
+
+        return _Thread()
+
+    class _FakeWatcher:
+        def __init__(self) -> None:
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return True
+
+    async def scenario() -> tuple[bool, str]:
+        machine = DictationMachine(settings=Settings(model_kind="local"))
+        fake_watcher = _FakeWatcher()
+        machine._watcher = fake_watcher  # type: ignore[attr-defined]
+        real_cached = state_mod.is_model_cached
+        real_warm = state_mod.ensure_warm_async
+        state_mod.is_model_cached = fake_is_cached
+        state_mod.ensure_warm_async = fake_ensure_warm
+        try:
+            task = asyncio.create_task(machine.run())
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if machine.state == State.ERROR:
+                    break
+            else:
+                machine.stop()
+                return False, "machine never reached ERROR after failed warmup"
+            if not machine.warmup_failed:
+                machine.stop()
+                return False, "warmup_failed flag not set after failed warmup"
+            if not fake_watcher.started:
+                machine.stop()
+                return False, "hotkey watcher not armed after failed warmup"
+            machine._hotkey_queue.put_nowait(
+                HotkeyEvent(edge=HotkeyEdge.PRESS, flags=0, keycode=0x3D)
+            )
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if machine.state == State.READY:
+                    break
+            else:
+                machine.stop()
+                return False, f"retry did not reach READY (state={machine.state})"
+            machine.stop()
+            await asyncio.wait_for(task, timeout=2.0)
+        finally:
+            state_mod.is_model_cached = real_cached
+            state_mod.ensure_warm_async = real_warm
+        return True, ""
+
+    try:
+        ok, detail = asyncio.run(scenario())
+    except Exception as exc:  # noqa: BLE001
+        return Result("warmup-retry", False, f"raised: {exc}")
+    if not ok:
+        return Result("warmup-retry", False, detail)
+    if calls["warm"] != 2:
+        return Result(
+            "warmup-retry",
+            False,
+            f"expected 2 warmup attempts, got {calls['warm']}",
+        )
+    return Result(
+        "warmup-retry",
+        True,
+        "failed warmup stays retryable; Right Option re-runs warmup → READY",
+    )
+
+
 def test_recorder_portaudio_retry() -> Result:
     """When the first ``sd.InputStream`` open fails with a PortAudioError
     (stale device snapshot after a topology change), Recorder must
@@ -781,6 +937,7 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_vad_speech_like,
         lambda: test_asr_smoke(language=language),
         test_typer_dispatch,
+        test_ssl_certifi_on_disk,
         test_config_v1_migration_keeps_language,
         test_config_invalid_endpoint_rejected,
         test_config_missing_api_fields_when_kind_local,
@@ -788,6 +945,7 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_api_transcribe_sends_model_id_and_bearer,
         test_api_transcribe_omits_language_when_auto,
         test_models_endpoint_check_accepts_and_rejects,
+        test_warmup_failure_retryable,
         test_recorder_portaudio_retry,
         test_hotkey_escape_event,
     ]
