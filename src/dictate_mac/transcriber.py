@@ -3,9 +3,12 @@
 Two paths produce text from a mono 16 kHz float32 buffer:
 
 * ``_transcribe_local`` runs ``mlx-community/whisper-large-v3-turbo``
-  in-process via ``mlx_whisper.transcribe``. The model is loaded on
-  first call and stays resident in RAM for the lifetime of the
-  process.
+  in-process via ``mlx_whisper.transcribe``. The model is loaded once
+  through mlx-whisper's own ``ModelHolder`` cache — so the warmup and
+  every later transcription share a single instance — and stays
+  resident in RAM for the lifetime of the process. The MLX Metal
+  buffer cache is returned to the OS (``mx.clear_cache``) after each
+  transcription, so the footprint does not grow across dictations.
 * ``_transcribe_api`` POSTs a 16 kHz mono WAV to an
   OpenAI-compatible ``/v1/audio/transcriptions`` endpoint, passing the
   model id and bearer token the user configured in the menu bar.
@@ -35,6 +38,7 @@ import os
 import threading
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 import numpy as np
@@ -111,6 +115,18 @@ _warmup_thread: Optional[threading.Thread] = None
 _warmup_lock = threading.Lock()
 _warmup_callback: Optional[WarmCallback] = None
 
+# MLX registers GPU stream handles per-thread: a model loaded on one
+# thread dies on any other with "There is no Stream(gpu, N) in current
+# thread". Callers reach us from arbitrary threads (the warmup thread,
+# ``asyncio.to_thread`` pool workers, the CLI main thread), so the load
+# and every transcription are pinned to one dedicated worker.
+_mlx_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-asr")
+
+
+def _run_on_mlx_thread(fn, *args, **kwargs):
+    """Run ``fn`` on the dedicated MLX thread, wait, re-raise errors."""
+    return _mlx_executor.submit(fn, *args, **kwargs).result()
+
 
 def _emit(phase: WarmPhase, detail: str = "") -> None:
     cb = _warmup_callback
@@ -130,7 +146,7 @@ def _do_warmup_blocking() -> None:
             logger.info("downloading %s …", MODEL_REPO)
             _local_model_path()
         _emit("loading", "")
-        _load_model()
+        _run_on_mlx_thread(_load_model)
         _emit("ready", "")
     except Exception as exc:  # noqa: BLE001
         logger.exception("background warmup failed; the next transcribe() will retry")
@@ -195,11 +211,16 @@ def _load_model():
         if _model is not None:
             return _model
         t0 = time.perf_counter()
-        from mlx_whisper.load_models import load_model
+        import mlx.core as mx
+        from mlx_whisper.transcribe import ModelHolder
 
         local_path = _local_model_path()
         logger.info("loading mlx-whisper model %s …", MODEL_REPO)
-        _model = load_model(local_path)
+        # Route the warmup through mlx-whisper's own ModelHolder so the
+        # instance warmed here is the same object mlx_whisper.transcribe()
+        # reuses later. A private load_model() copy would double the
+        # weight footprint (~1.6 GB x 2).
+        _model = ModelHolder.get_model(local_path, mx.float16)
         dt = time.perf_counter() - t0
         logger.info("model loaded in %.1fs (will stay in RAM)", dt)
         return _model
@@ -207,7 +228,7 @@ def _load_model():
 
 def warm() -> None:
     """Force-load the local model (used by ``dictate-mac warmup``)."""
-    _load_model()
+    _run_on_mlx_thread(_load_model)
 
 
 def model_loaded() -> bool:
@@ -403,14 +424,19 @@ def _transcribe_api(
 
 
 def _transcribe_local(audio: np.ndarray, language: str) -> str:
-    """Run the in-process mlx-whisper model."""
+    """Run the in-process mlx-whisper model (pinned to the MLX thread)."""
+    if audio is None or audio.size == 0:
+        return ""
+    return _run_on_mlx_thread(_transcribe_local_mlx, audio, language)
+
+
+def _transcribe_local_mlx(audio: np.ndarray, language: str) -> str:
     from dictate_mac.config import AUTO as CONFIG_AUTO
 
     global _first_call_done
-    if audio is None or audio.size == 0:
-        return ""
     _load_model()
 
+    import mlx.core as mx
     import mlx_whisper
 
     local_path = _local_model_path()
@@ -418,14 +444,25 @@ def _transcribe_local(audio: np.ndarray, language: str) -> str:
     whisper_lang: Optional[str] = None if language == CONFIG_AUTO else language
 
     t0 = time.perf_counter()
-    result = mlx_whisper.transcribe(
-        audio,
-        path_or_hf_repo=local_path,
-        language=whisper_lang,
-        task=TASK,
-        fp16=True,
-        verbose=False,
-    )
+    try:
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=local_path,
+            language=whisper_lang,
+            task=TASK,
+            fp16=True,
+            verbose=False,
+        )
+    finally:
+        # Return the Metal free-list cache to the OS. The decoder grows
+        # its KV buffers by concatenation at every token step, so each
+        # decode leaves hundreds of MB of unique-size buffers cached;
+        # without this, the footprint climbs with every dictation.
+        # Measured cost of re-allocating on the next run: ~0.01-0.05 s.
+        cached = mx.get_cache_memory()
+        if cached:
+            mx.clear_cache()
+            logger.debug("returned %.0f MB of MLX buffer cache to the OS", cached / 1e6)
     text = (result.get("text") or "").strip()
     dt = time.perf_counter() - t0
     if not _first_call_done:

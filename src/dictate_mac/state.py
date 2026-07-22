@@ -437,8 +437,12 @@ class DictationMachine:
                 )
         except RuntimeError as exc:
             dt = time.perf_counter() - t0
+            backend = (
+                "api" if self._settings.model_kind == MODEL_KIND_API else "local"
+            )
             logger.warning(
-                "[asr] api back-end failed after %.2fs: %s — typing nothing",
+                "[asr] %s back-end failed after %.2fs: %s — typing nothing",
+                backend,
                 dt,
                 exc,
             )

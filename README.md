@@ -3,7 +3,7 @@
 Voice dictation for macOS with **two ASR backends** selectable at runtime:
 
 - **Local** — `mlx-community/whisper-large-v3-turbo` runs in-process via
-  MLX on Apple Silicon (~1.5 GB RAM, works fully offline).
+  MLX on Apple Silicon (~1.6 GB RAM, works fully offline).
 - **API** — any OpenAI-compatible `/v1/audio/transcriptions` endpoint
   (your gateway, a hosted service, …). No ASR model loaded; only audio
   is uploaded per recording.
@@ -301,7 +301,9 @@ in the **Transcribing** step.
 
 - **What it does:** runs the in-process mlx-whisper
   (`mlx-community/whisper-large-v3-turbo`).
-- **Cost:** ~1.5 GB RAM permanently after first warmup.
+- **Cost:** ~1.6 GB RAM permanently after first warmup, plus a brief
+  transient peak during recognition that is returned to the OS right
+  after each dictation.
 - **Disk:** ~1.5 GB Whisper weights downloaded on first launch to
   `~/.cache/huggingface/hub/`. Cached for subsequent launches.
 - **Network:** none after the first download — works fully offline.
@@ -471,7 +473,7 @@ opens the log file in your default `.log` viewer (Console.app).
 │                    ┌─────────┴─────────┐                         │
 │                    ▼                   ▼                         │
 │            mlx-whisper (local)   POST /v1/audio/transcriptions  │
-│            ~1.5 GB RAM           bearer + model id (api)         │
+│            ~1.6 GB RAM           bearer + model id (api)         │
 │                                                                   │
 │                          │ text                                  │
 │                          ▼                                       │

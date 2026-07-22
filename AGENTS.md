@@ -67,7 +67,7 @@ backends selected at runtime:
 - Audio is captured at 16 kHz mono, trimmed with `silero-vad`, and
   transcribed with one of:
   - **Local** — `mlx-whisper` (`mlx-community/whisper-large-v3-turbo`)
-    running in-process. ~1.5 GB resident in RAM.
+    running in-process. ~1.6 GB resident in RAM.
   - **API** — POST to an OpenAI-compatible
     `/v1/audio/transcriptions` endpoint with a user-provided bearer
     token and model id. No in-process ASR model.
@@ -110,7 +110,7 @@ dictate-mac/
 │       │   └── timing.py   # raises — we never call add_word_timestamps
 │       └── torchaudio/     # Python stub used by the silero-vad path
 ├── src/dictate_mac/
-│   ├── __init__.py         # __version__ (currently 0.4.1)
+│   ├── __init__.py         # __version__ (currently 0.4.2)
 │   ├── __main__.py         # python -m dictate_mac
 │   ├── cli.py              # argparse + daemon / warmup / selftest / menubar
 │   ├── audio.py            # Recorder + silero-vad trim_silence
@@ -170,13 +170,14 @@ reach across module boundaries — use the public surface listed.
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-Three threads at runtime:
+Four threads at runtime:
 
 | Thread        | Owner                              | Notes                                  |
 | ------------- | ---------------------------------- | -------------------------------------- |
 | Main          | `rumps.App`                        | Status item, menu, 0.5 s refresh timer |
 | Worker        | `DictationMachine.run`             | Asyncio loop, state transitions        |
 | CFRunLoop     | `HotkeyWatcher`                    | `CGEventTap`, Right Option             |
+| mlx-asr       | `transcriber._mlx_executor`        | Model load + every local transcription |
 
 The Main thread reads `DictationMachine.state` (a `threading.Lock`-guarded
 snapshot); the Worker writes it. The CFRunLoop thread pushes events to a
@@ -207,8 +208,31 @@ the reason is still valid after you check the source.
 
 - **mlx-whisper large-v3-turbo, MLX variant.** `mlx-community/whisper-
   large-v3-turbo` is the MLX re-serialisation of `openai/whisper-large-
-  v3-turbo` — same weights, different runtime. ~1.5 GB in RAM. Stays
-  resident until process exit.
+  v3-turbo` — same weights, different runtime. ~1.6 GB in RAM (fp16).
+  Stays   resident until process exit. The warmup loads it through
+  mlx-whisper's own `ModelHolder` cache, so the warmed instance is the
+  same object `mlx_whisper.transcribe()` reuses — a private
+  `load_model()` copy would double the weight footprint (~1.6 GB × 2).
+- **All MLX work is pinned to one dedicated thread.** MLX registers
+  GPU stream handles per-thread, so a model loaded on the warmup
+  thread cannot be evaluated on the `asyncio.to_thread` pool worker
+  that runs a later transcription — it dies with `There is no
+  Stream(gpu, N) in current thread`, and neither an explicit shared
+  `mx.stream` nor `mx.synchronize()` lifts the binding. The model
+  load and every local transcription are therefore submitted to
+  `transcriber._mlx_executor` (a `ThreadPoolExecutor(max_workers=1)`)
+  no matter which caller thread invoked them.
+- **The MLX Metal buffer cache is returned to the OS after each
+  transcription.** The whisper decoder grows its self-attention KV
+  buffers by `mx.concatenate` at every token step, so each decode
+  leaves ~0.4-2 GB of unique-size buffers sitting in MLX's free-list
+  cache (visible as `IOAccelerator` footprint); without intervention
+  the footprint climbs with every dictation and macOS just compresses
+  the idle pages. `_transcribe_local` calls `mx.clear_cache()` in a
+  `finally` after `mlx_whisper.transcribe` returns; the measured cost
+  of re-allocating on the next dictation is ~0.01-0.05 s. Steady-state
+  footprint in local mode: ~1.8-2.0 GB, with a brief peak during
+  recognition that is released immediately after.
 - **OpenAI-compatible API backend as an alternative to the local
   model.** When `model_kind=api`, the same trimmed audio buffer is
   encoded as 16 kHz mono PCM WAV (`_audio_to_wav_bytes`) and POSTed to
@@ -251,7 +275,7 @@ the reason is still valid after you check the source.
 - **API mode skips the local-model load entirely.** When
   `model_kind="api"`, `_warmup` short-circuits: no
   `is_model_cached()` check, no `snapshot_download`, no
-  `mlx_whisper.load_models`. ~1.5 GB of RAM is never allocated. The
+  `mlx_whisper.load_models`. ~1.6 GB of RAM is never allocated. The
   hotkey watcher still arms normally so the daemon stays
   responsive.
 - **Warmup failure is retryable, not terminal.** When the local-model
@@ -601,8 +625,11 @@ would block forever in a headless context).
 
 ## 12. Known limitations
 
-- ~1.5 GB of RAM held permanently after first warmup **in local
-  mode**. In API mode the warmup thread is skipped entirely and
+- ~1.6 GB of RAM held permanently after first warmup **in local
+  mode** (steady-state footprint ~1.8-2.0 GB; transient decode
+  buffers peak briefly during recognition and are returned to the OS
+  via `mx.clear_cache()` right after). In API mode the warmup thread
+  is skipped entirely and
   the local model is never loaded; switching from local to API via
   the menu triggers a restart that drops the previously-loaded
   weights.
