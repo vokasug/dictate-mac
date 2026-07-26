@@ -92,11 +92,12 @@ from rumps import events
 from dictate_mac import config as config_mod
 from dictate_mac.config import (
     MODEL_KIND_API,
+    MODEL_KIND_GIGAAM,
     MODEL_KIND_LOCAL,
     normalize_endpoint,
 )
 from dictate_mac.state import DictationMachine, Settings, State
-from dictate_mac.transcriber import MODEL_REPO
+from dictate_mac.transcriber import GIGAAM_REPO, MODEL_REPO
 
 logger = logging.getLogger("dictate_mac.menubar")
 
@@ -149,6 +150,13 @@ _STATUS_LABELS: dict[State, str] = {
     State.ERROR: "Error: see logs",
 }
 
+# Download/load labels for the GigaAM backend — swapped in by the
+# status timer when model_kind == "gigaam".
+_STATUS_LABELS_GIGAAM: dict[State, str] = {
+    State.DOWNLOADING_MODEL: "Downloading GigaAM model…",
+    State.LOADING_MODEL: "Loading GigaAM into RAM…",
+}
+
 
 class MenubarApp(rumps.App):
     """NSStatusItem-driven dictation daemon.
@@ -199,11 +207,12 @@ class MenubarApp(rumps.App):
             self._lang_parent.add(item)
 
         # ---- model submenu -------------------------------------------
-        # Disabled header + two clickable rows: a local mlx-whisper
-        # row that switches back without prompting, and an API row that
-        # opens the credentials dialog (see model_settings_dialog.py).
-        # The API row's title carries the active endpoint host so the
-        # user knows where audio will go without re-opening the dialog.
+        # Disabled header + three clickable rows: a local mlx-whisper
+        # row and a local GigaAM row that switch back without prompting,
+        # and an API row that opens the credentials dialog (see
+        # model_settings_dialog.py). The API row's title carries the
+        # active endpoint host so the user knows where audio will go
+        # without re-opening the dialog.
         self._model_header = rumps.MenuItem(MODEL_HEADER, callback=None)
         try:
             self._model_header._menuitem.setEnabled_(False)
@@ -213,6 +222,10 @@ class MenubarApp(rumps.App):
         self._model_local_item = rumps.MenuItem(
             self._format_model_local_title(settings.model_kind),
             callback=self._select_model_local,
+        )
+        self._model_gigaam_item = rumps.MenuItem(
+            self._format_model_gigaam_title(settings.model_kind),
+            callback=self._select_model_gigaam,
         )
         self._model_api_item = rumps.MenuItem(
             self._format_model_api_title(settings.api_endpoint, settings.model_kind),
@@ -262,6 +275,7 @@ class MenubarApp(rumps.App):
             None,  # separator
             self._model_header,
             self._model_local_item,
+            self._model_gigaam_item,
             self._model_api_item,
             None,  # separator
             self._lang_parent,
@@ -280,6 +294,11 @@ class MenubarApp(rumps.App):
 
         # NOTE: the permission rows are static shortcuts to System
         # Settings; their labels do not change at runtime.
+
+        # GigaAM is a fixed multilingual CTC with no language
+        # parameter — the Recognition-language menu is disabled while
+        # that backend is active.
+        self._update_language_menu_enabled()
 
         # Hook the lifecycle events. ``register`` returns the function
         # so we keep a reference (events uses a set of weakrefs in
@@ -499,6 +518,28 @@ class MenubarApp(rumps.App):
     def _format_lang_parent_title(code: str) -> str:
         return f"{LANG_PARENT_LABEL} {config_mod.display_name(code)}"
 
+    def _lang_parent_title(self) -> str:
+        base = self._format_lang_parent_title(self._settings.language)
+        if self._settings.model_kind == MODEL_KIND_GIGAAM:
+            return f"{base} (N/A for GigaAM)"
+        return base
+
+    def _update_language_menu_enabled(self) -> None:
+        """Grey out the language menu when the backend ignores it.
+
+        GigaAM's multilingual CTC has no language parameter, so the
+        submenu is disabled while ``model_kind == "gigaam"``; whisper
+        and API modes re-enable it. Idempotent.
+        """
+        enabled = self._settings.model_kind != MODEL_KIND_GIGAAM
+        try:
+            self._lang_parent._menuitem.setEnabled_(enabled)
+        except Exception:  # noqa: BLE001
+            pass
+        new_title = self._lang_parent_title()
+        if self._lang_parent.title != new_title:
+            self._lang_parent.title = new_title
+
     @staticmethod
     def _format_lang_item_title(code: str, display: str, active: str) -> str:
         prefix = CHECK_GLYPH if code == active else "  "
@@ -507,7 +548,12 @@ class MenubarApp(rumps.App):
     @staticmethod
     def _format_model_local_title(active_kind: str) -> str:
         prefix = CHECK_GLYPH if active_kind == MODEL_KIND_LOCAL else "  "
-        return f"{prefix}Local ({MODEL_REPO})"
+        return f"{prefix}Local Whisper ({MODEL_REPO})"
+
+    @staticmethod
+    def _format_model_gigaam_title(active_kind: str) -> str:
+        prefix = CHECK_GLYPH if active_kind == MODEL_KIND_GIGAAM else "  "
+        return f"{prefix}Local GigaAM ({GIGAAM_REPO})"
 
     @staticmethod
     def _format_model_api_title(endpoint: str, active_kind: str) -> str:
@@ -555,7 +601,7 @@ class MenubarApp(rumps.App):
         the 0.5 s status timer no longer drives this refresh.
         """
         active = self._settings.language
-        new_parent = self._format_lang_parent_title(active)
+        new_parent = self._lang_parent_title()
         if self._lang_parent.title != new_parent:
             self._lang_parent.title = new_parent
         for code, item in self._lang_items.items():
@@ -589,6 +635,18 @@ class MenubarApp(rumps.App):
         self._settings.model_kind = MODEL_KIND_LOCAL
         self._persist_settings()
         self._refresh_model_menu()
+        self._update_language_menu_enabled()
+        self._trigger_model_restart()
+
+    def _select_model_gigaam(self, _sender) -> None:
+        """Switch to the local GigaAM multilingual CTC model and restart."""
+        if self._settings.model_kind == MODEL_KIND_GIGAAM:
+            return
+        logger.info("model switched: %s -> gigaam", self._settings.model_kind)
+        self._settings.model_kind = MODEL_KIND_GIGAAM
+        self._persist_settings()
+        self._refresh_model_menu()
+        self._update_language_menu_enabled()
         self._trigger_model_restart()
 
     def _open_model_api_dialog(self, _sender) -> None:
@@ -636,6 +694,7 @@ class MenubarApp(rumps.App):
                 result.api_model_id,
             )
             self._refresh_model_menu()
+            self._update_language_menu_enabled()
             self._trigger_model_restart()
 
     def _refresh_model_menu(self) -> None:
@@ -643,6 +702,9 @@ class MenubarApp(rumps.App):
         new_local = self._format_model_local_title(self._settings.model_kind)
         if self._model_local_item.title != new_local:
             self._model_local_item.title = new_local
+        new_gigaam = self._format_model_gigaam_title(self._settings.model_kind)
+        if self._model_gigaam_item.title != new_gigaam:
+            self._model_gigaam_item.title = new_gigaam
         new_api = self._format_model_api_title(
             self._settings.api_endpoint, self._settings.model_kind
         )
@@ -687,6 +749,11 @@ class MenubarApp(rumps.App):
         if state is not None:
             if state == State.ERROR and self._machine.warmup_failed:
                 label = "Model download failed — press Right Option to retry"
+            elif (
+                self._settings.model_kind == MODEL_KIND_GIGAAM
+                and state in _STATUS_LABELS_GIGAAM
+            ):
+                label = _STATUS_LABELS_GIGAAM[state]
             else:
                 label = _STATUS_LABELS.get(state, state.value)
             new_title = f"Status: {label}"

@@ -57,7 +57,7 @@ catches the leak at commit time rather than after a public release.
 
 ## 1. What this project is
 
-`dictate-mac` is a macOS-only voice dictation daemon with two ASR
+`dictate-mac` is a macOS-only voice dictation daemon with three ASR
 backends selected at runtime:
 
 - The user presses **Right Option** to start recording and presses it
@@ -66,8 +66,15 @@ backends selected at runtime:
   transcribed or typed.
 - Audio is captured at 16 kHz mono, trimmed with `silero-vad`, and
   transcribed with one of:
-  - **Local** — `mlx-whisper` (`mlx-community/whisper-large-v3-turbo`)
+  - **Local Whisper** — `mlx-whisper` (`mlx-community/whisper-large-v3-turbo`)
     running in-process. ~1.6 GB resident in RAM.
+  - **Local GigaAM** — `gigaam-multilingual-mlx`
+    (`ai-babai/gigaam-multilingual-mlx`, FP16 artifact), a multilingual
+    CTC Conformer running in-process via MLX. ~1.4 GB resident in RAM.
+    Supports Russian, English, Kazakh, Kyrgyz and Uzbek — all
+    auto-detected (the model has no language parameter, so the
+    Recognition-language menu is disabled while this backend is
+    active). Output is lowercase without punctuation.
   - **API** — POST to an OpenAI-compatible
     `/v1/audio/transcriptions` endpoint with a user-provided bearer
     token and model id. No in-process ASR model.
@@ -79,11 +86,11 @@ backends selected at runtime:
 The default entry point is `dictate-mac` (no subcommand) — a `rumps`
 menu bar app. `dictate-mac daemon` is a CLI-only mode for SSH/CI/tmux.
 
-Switching between the two ASR backends is a **restart-required**
-operation: the local model is loaded once at startup and held in RAM,
+Switching between the three ASR backends is a **restart-required**
+operation: each local model is loaded once at startup and held in RAM,
 so flipping backends mid-session would either keep the old model
-wasted in RAM (Local → API) or block on a fresh ~30-60 s
-download/load (API → Local). On a backend switch the daemon re-execs
+wasted in RAM (local → API) or block on a fresh ~30-60 s
+download/load (API → local). On a backend switch the daemon re-execs
 itself so the new mode takes effect at boot with no model download
 when API was just selected.
 
@@ -114,7 +121,7 @@ dictate-mac/
 │   ├── __main__.py         # python -m dictate_mac
 │   ├── cli.py              # argparse + daemon / warmup / selftest / menubar
 │   ├── audio.py            # Recorder + silero-vad trim_silence
-│   ├── transcriber.py      # ASR backends: mlx-whisper local + OpenAI-compatible API
+│   ├── transcriber.py      # ASR backends: mlx-whisper + GigaAM local + OpenAI-compatible API
 │   ├── typer.py            # CGEvent Unicode injector (+ osascript fallback)
 │   ├── hotkey.py           # Quartz CGEventTap on Right Option
 │   ├── state.py            # asyncio state machine (DictationMachine)
@@ -126,7 +133,7 @@ dictate-mac/
 ├── tests/
 │   ├── inject_option.py    # synthetic Right Option injector
 │   └── dialog_smoke.py     # API dialog standalone smoke test
-└── dist/DictateMac.app     # build artifact (~284 MB)
+└── dist/DictateMac.app     # build artifact (~285 MB)
 ```
 
 ## 3. Module map
@@ -138,11 +145,11 @@ reach across module boundaries — use the public surface listed.
 | ------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------- |
 | `cli.py`                  | argparse, subcommand dispatch, app-bundle detection           | `main`, `cmd_daemon`, `cmd_warmup`, `cmd_selftest`, `cmd_menubar`      |
 | `audio.py`                | mic capture + VAD trimming                                    | `Recorder`, `AudioConfig`, `trim_silence`, `has_speech`                |
-| `transcriber.py`          | ASR backends: local mlx-whisper + OpenAI-compatible API       | `transcribe(audio, language, *, model_kind, api_*)`, `check_api_model_available`, `ensure_warm_async`, `warm`, `is_model_cached`, `model_loaded`, `_audio_to_wav_bytes` |
+| `transcriber.py`          | ASR backends: local mlx-whisper + GigaAM CTC + OpenAI-compatible API | `transcribe(audio, language, *, model_kind, api_*)`, `check_api_model_available`, `ensure_warm_async`, `warm`, `is_model_cached`, `model_loaded`, `gigaam_loaded`, `_audio_to_wav_bytes` |
 | `typer.py`                | keystroke injection into focused window                       | `type_text(text, backend, per_char_delay_ms)`, `type_text_quartz`, `type_text_osascript` |
 | `hotkey.py`               | global Right Option watcher (+ Esc cancel)                    | `HotkeyWatcher(output_queue)`, `HotkeyEdge`, `HotkeyEvent`              |
 | `state.py`                | orchestrates the loop: warm → arm → record → transcribe → type | `DictationMachine`, `Settings`, `State`, `SOUND_START`, `SOUND_END`     |
-| `config.py`               | persisted settings (language + ASR backend + API credentials) | `AUTO`, `SUPPORTED_ISO_639_1`, `MODEL_KINDS`, `MODEL_KIND_LOCAL`, `MODEL_KIND_API`, `menu_items`, `display_name`, `load`, `save`, `PersistedSettings`, `normalize_endpoint`, `endpoint_scheme_ok`, `detect_system_primary_language` |
+| `config.py`               | persisted settings (language + ASR backend + API credentials) | `AUTO`, `SUPPORTED_ISO_639_1`, `MODEL_KINDS`, `MODEL_KIND_LOCAL`, `MODEL_KIND_GIGAAM`, `MODEL_KIND_API`, `menu_items`, `display_name`, `load`, `save`, `PersistedSettings`, `normalize_endpoint`, `endpoint_scheme_ok`, `detect_system_primary_language` |
 | `menubar.py`              | NSStatusItem + Model/language submenus                        | `run_menubar(settings)`, `MenubarApp`                                   |
 | `model_settings_dialog.py`| API credentials modal — 3 fields, GET /models check on OK     | `ApiModelSettingsDialog`, `ApiModelSettingsResult`                      |
 | `logutils.py`             | stderr vs `~/Library/Logs/dictate-mac/dictate-mac.log`        | `configure_logging`, `is_app_bundle`, `LOG_FILE`, `LOG_FORMAT`          |
@@ -161,7 +168,7 @@ reach across module boundaries — use the public surface listed.
 │             │ state (0.5 s poll)     │ events                     │
 │             ▼                        ▼                            │
 │            DictationMachine (asyncio worker thread)               │
-│            recorder · silero-vad · mlx-whisper · typer            │
+│            recorder · silero-vad · ASR backends · typer           │
 │                                                                   │
 │                          │ text                                  │
 │                          ▼                                       │
@@ -233,6 +240,69 @@ the reason is still valid after you check the source.
   of re-allocating on the next dictation is ~0.01-0.05 s. Steady-state
   footprint in local mode: ~1.8-2.0 GB, with a brief peak during
   recognition that is released immediately after.
+- **Whisper decode options are pinned in `_transcribe_local_mlx`.**
+  The call passes `condition_on_previous_text=True` (previous-window
+  text is carried into the next 30 s window's prompt, keeping style
+  consistent across long recordings), `temperature=(0.0, 0.2, 0.4)`
+  (fallback ladder used when a window fails the compression-ratio /
+  logprob checks), `best_of=3` (each sampled fallback temperature
+  keeps the best of 3 trajectories — mlx-whisper's stand-in for
+  beam search, which upstream does not implement), and an
+  `initial_prompt` from `WHISPER_INITIAL_PROMPTS` — a punctuated,
+  capitalized sample sentence covering the top 30 languages by
+  number of speakers, sent only when the user pinned one of those
+  languages in the menu (never for `auto`).
+- **GigaAM multilingual CTC as the third backend.** When
+  `model_kind="gigaam"`, transcription runs through the
+  `gigaam-multilingual-mlx` package (FP16 artifact,
+  `ai-babai/gigaam-multilingual-mlx`, pinned revision read from the
+  package's own `VARIANTS` table). The trimmed float32 buffer goes
+  straight into `GigaAMCTC.__call__` (the model does its own log-mel
+  frontend) and `greedy_decode` — no WAV encoding, no language
+  parameter: the model is a fixed multilingual CTC
+  (ru/en/kk/ky/uz auto-detected), so `transcribe()` ignores
+  `language` on this path and the menu bar disables the
+  Recognition-language menu (`_update_language_menu_enabled`).
+  Load and inference are pinned to the same
+  `transcriber._mlx_executor` thread as the whisper path (same MLX
+  per-thread Metal-stream constraint), and `mx.clear_cache()` runs
+  in a `finally` after each decode. Output is lowercase without
+  punctuation — inherent to greedy CTC. Warmup reuses the whisper
+  machinery:   `ensure_warm_async(model_kind=...)` and
+  `is_model_cached(model_kind)` branch per backend, and the state
+  machine's DOWNLOADING/LOADING flow is shared. `load_weights`
+  only memory-maps the safetensors, so `_load_gigaam` ends with an
+  eager `mx.eval(model.parameters())` — same as the whisper path:
+  the ~1.2 GB page-in happens during warmup, not on the user's
+  first dictation.
+- **GigaAM buffers longer than 20 s are decoded in overlapping
+  windows.** The conformer is trained on ~20 s utterances; a
+  multi-minute one-shot buffer degrades recognition progressively
+  with position (rotary attention outside its training length) and
+  costs O(T^2) attention memory (~11 GB transient for 12 min).
+  `_transcribe_gigaam_mlx` routes buffers over
+  `GIGAAM_CHUNK_SECONDS` (20 s) into `_gigaam_transcribe_chunks`:
+  fixed 20 s windows with 2 s overlap, each decoded word kept only
+  in the window whose core contains its temporal midpoint (word
+  timing from CTC `token_frames`). This mirrors the package's own
+  `service.transcribe_file` strategy, with one deliberate
+  deviation: upstream drops the `keep_lo` guard for the final
+  window, which duplicates overlap words there — our guard applies
+  in all windows. Residual artifact: CTC emission frames are
+  approximate, so a word sitting exactly on a window boundary can
+  occasionally be emitted by both windows (rare duplicated word).
+  Shorter buffers stay one-shot, so normal dictation latency is
+  unchanged.
+- **The bundle process can start with an ASCII locale, breaking the
+  GigaAM artifact load.** The py2app launcher environment may leave
+  the process on a POSIX/C locale, so `Path.read_text()` defaults to
+  ASCII and decoding `config.json` (Cyrillic vocabulary) dies with
+  `UnicodeDecodeError: 'ascii' codec ...`. `_load_gigaam` calls
+  `_ensure_utf8_locale()` first: it flips `LC_CTYPE` to
+  `en_US.UTF-8` via `locale.setlocale` when
+  `locale.getencoding()` isn't UTF-8 — `open()` re-queries the
+  locale on every call, so no interpreter restart is needed. No-op
+  in the venv.
 - **OpenAI-compatible API backend as an alternative to the local
   model.** When `model_kind=api`, the same trimmed audio buffer is
   encoded as 16 kHz mono PCM WAV (`_audio_to_wav_bytes`) and POSTed to
@@ -265,9 +335,9 @@ the reason is still valid after you check the source.
   both fields keeps them in sync via `controlTextDidChange:`. The
   show/hide eye button toggles visibility and re-copies `_key_value`
   into the now-visible field.
-- **Model switching requires an app restart.** Selecting **Local** in
-  the Model menu (when currently on API) or vice-versa writes the
-  new `model_kind` to the config file and immediately calls
+- **Model switching requires an app restart.** Selecting a different
+  row in the Model menu (Local Whisper / Local GigaAM / API) writes
+  the new `model_kind` to the config file and immediately calls
   `MenubarApp._restart_app` — the same `osascript` helper the
   **Restart** menu item uses. The user is dropped back into the
   freshly-launched bundle with the new backend active. No restart is
@@ -430,12 +500,17 @@ the reason is still valid after you check the source.
      `numpy/typing/`, `numpy/_examples`, `numpy/include/`,
      `numpy/{strings,char,core,rec,ctypeslib,dtypes,exceptions,
      ma,polynomial}`, `mlx/include/`, all `*.pyi` stubs,
-     `huggingface_hub/{cli,inference,serialization,hub_mixin}`,
-     three unused `mlx_whisper` modules, `silero_vad.jit` and
-     the four alt-opset `.onnx` variants, the top-level and
-     `data/silero_vad/` mirrors of `silero_vad.onnx`,
-     `Contents/Resources/include/` and `openssl.ca/`,
-     duplicate `mlx.metallib`/`libmlx.dylib`/`libjaccl.dylib`.
+      `huggingface_hub/{cli,inference,serialization,hub_mixin}`,
+      three unused `mlx_whisper` modules, every
+      `gigaam_multilingual_mlx` module the dictation path doesn't
+      import (CLI, HTTP server, file service, ffmpeg decoder,
+      benchmark/conversion tooling — kept: `__init__`, `_version`,
+      `model`, `config`, `artifacts`, `quantization`),
+      `silero_vad.jit` and
+      the four alt-opset `.onnx` variants, the top-level and
+      `data/silero_vad/` mirrors of `silero_vad.onnx`,
+      `Contents/Resources/include/` and `openssl.ca/`,
+      duplicate `mlx.metallib`/`libmlx.dylib`/`libjaccl.dylib`.
     - `_rewrite_boot_script` — replace the build-time venv path in
       `__boot__.py` with `os.environ['RESOURCEPATH']` so the bundle
       uses its embedded Python framework. Also rewrites py2app's
@@ -464,14 +539,24 @@ the reason is still valid after you check the source.
       caches is free at runtime.
 
 Bundle id: `com.local.dictate-mac`. No code signing, no notarisation.
-Final size: ~284 MB on disk.
+Final size: ~285 MB on disk.
+
+`gigaam_multilingual_mlx` is listed in `OPTIONS['packages']` (mirrored
+on disk) and its zip entries are removed in
+`_extract_native_runtime_libs`, same as `mlx_whisper`. `psutil` — a
+transitive dependency imported only by gigaam's stripped file-service
+module — is removed from the zip entirely (its C extension can't load
+from a zip anyway, and nothing at runtime imports it). The
+`gigaam-multilingual-mlx` model weights are never bundled; they
+download to the standard HF cache on first launch of gigaam mode.
 
 ## 7. Dependencies (`pyproject.toml`)
 
 Python 3.13.x on Apple Silicon.
 
 Runtime:
-`mlx>=0.32`, `mlx-whisper`, `huggingface_hub>=0.20`,
+`mlx>=0.32,<0.33`, `mlx-whisper`,
+`gigaam-multilingual-mlx>=0.2,<0.3`, `huggingface_hub>=0.20`,
 `sounddevice>=0.4.6`, `silero-vad>=5.1`, `onnxruntime>=1.17`,
 `pyobjc-framework-Quartz>=10.2`, `numpy>=1.26`, `rumps>=0.4.0`,
 `requests>=2.31`.
@@ -479,10 +564,12 @@ Runtime:
 Dev (build only): `py2app>=0.28`.
 
 Installed snapshot: `mlx 0.32.0`, `mlx-whisper 0.4.3`,
-`sounddevice 0.5.5`, `silero-vad 6.2.1`, `onnxruntime 1.27.0`,
+`gigaam-multilingual-mlx 0.2.0`, `sounddevice 0.5.5`,
+`silero-vad 6.2.1`, `onnxruntime 1.27.0`,
 `pyobjc-framework-Quartz 12.2.1`, `numpy 2.4.6`,
 `huggingface-hub 1.23.0`, `rumps 0.4.0`, `requests 2.34.2`,
-`py2app 0.28.10`.
+`py2app 0.28.10`. (`psutil` installs transitively with gigaam but
+is never imported at runtime and is excluded from the bundle.)
 
 ## 8. CLI surface
 
@@ -497,10 +584,14 @@ Installed snapshot: `mlx 0.32.0`, `mlx-whisper 0.4.3`,
 Common flags (must come before OR after the subcommand): `--quiet`,
 `--log-level` (DEBUG|INFO|WARNING|ERROR|CRITICAL), `--output`
 (quartz|osascript), `--language` (ISO-639-1 code or `auto`),
-`--model-kind` (`local` or `api`), `--api-endpoint`, `--api-key`,
-`--model-id`. The last four are meaningful only with
+`--model-kind` (`local`, `gigaam` or `api`), `--api-endpoint`,
+`--api-key`,
+`--model-id`. The last three are meaningful only with
 `--model-kind=api`; `cmd_daemon` refuses to start without the
-three required values when `api` is selected. CLI runs do not read
+three required values when `api` is selected. `--language` is
+ignored with `--model-kind=gigaam` (fixed multilingual CTC), and
+`cmd_warmup` refuses `--model-kind=api` (nothing to warm). CLI runs
+do not read
 or write the persisted config file — language and ASR settings are
 taken from flags directly. The menu bar entry point sources its
 settings from `~/.config/dictate-mac/config.json` and ignores all
@@ -517,7 +608,7 @@ Schema v2 contents:
 {
   "_v": 2,
   "language": "<iso-639-1 or 'auto'>",
-  "model_kind": "local|api",
+  "model_kind": "local|gigaam|api",
   "api_endpoint": "<openai-compatible base url>",
   "api_key": "<bearer token>",
   "api_model_id": "<model id the gateway should use>"
@@ -540,49 +631,65 @@ no supported match maps to `"auto"`.
 
 ## 10. Testing
 
-`dictate-mac selftest [--no-mic]` runs sixteen checks; optionally a
-seventeenth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
+`dictate-mac selftest [--no-mic]` runs twenty-two checks; optionally a
+twenty-third mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 
 1. **model-load** — `mlx_whisper` weights load into RAM.
 2. **vad-silence** — 1 s of zeros → VAD returns `[]`.
 3. **vad-speech-like** — AM-modulated noise → VAD returns something or
    `[]` (silero-vad is tuned for real speech; both are fine).
 4. **asr-smoke** — `transcribe()` returns a string of any length.
-5. **typer-dispatch** — the `type_text` router picks `quartz` / `osascript`
+5. **gigaam-model-load** — GigaAM FP16 weights load into RAM via
+   `warm(MODEL_KIND_GIGAAM)`.
+6. **gigaam-asr-smoke** — `transcribe(model_kind="gigaam")` returns a
+   string of any length on synthetic audio.
+7. **typer-dispatch** — the `type_text` router picks `quartz` / `osascript`
    / default correctly **without** injecting real keystrokes.
-6. **ssl-certifi** — `SSL_CERT_FILE`/`SSL_CERT_DIR` (when set) point at
+8. **ssl-certifi** — `SSL_CERT_FILE`/`SSL_CERT_DIR` (when set) point at
    real paths, `certifi.where()` is a real file,
    `ssl.create_default_context(cafile=…)` works, and `httpx.Client()`
    (the trust_env path huggingface_hub uses) constructs cleanly.
    Guards the .app HTTPS packaging (HF download + API backend).
-7. **config-v1-migration** — a v1 `config.json` loads as
+9. **config-v1-migration** — a v1 `config.json` loads as
    `model_kind="local"` with empty API fields and the persisted
    language preserved.
-8. **config-invalid-endpoint** — malformed endpoints (`ftp://…`,
-   bare host, etc.) are rejected by `PersistedSettings.is_valid`.
-9. **config-api-required-when-api** — `model_kind="local"` accepts
-   empty API fields; `model_kind="api"` rejects partial ones.
-10. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
+10. **config-invalid-endpoint** — malformed endpoints (`ftp://…`,
+    bare host, etc.) are rejected by `PersistedSettings.is_valid`.
+11. **config-api-required-when-api** — `model_kind="local"` accepts
+    empty API fields; `model_kind="api"` rejects partial ones.
+12. **config-gigaam-kind** — `model_kind="gigaam"` is valid without
+    API fields and survives a save/load roundtrip.
+13. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
     amplitude preserved to within one LSB.
-11. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
+14. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
     confirms the URL, multipart `model` field, `Authorization:
     Bearer` header and (when configured) `language` field are all
     wired correctly.
-12. **api-transcribe-auto-language** — when `language="auto"`, the
+15. **api-transcribe-auto-language** — when `language="auto"`, the
     `language` field is omitted from the form so the gateway falls
     back to its own detection.
-13. **api-models-check** — mocked `GET /v1/models` handles 200+id,
+16. **api-models-check** — mocked `GET /v1/models` handles 200+id,
     200-missing-id, 401, 404 and 500 correctly, and never leaks the
     fake API key string into any error.
-14. **warmup-retry** — a simulated warmup failure publishes a
+17. **gigaam-dispatch** — `transcribe(model_kind="gigaam")` routes to
+    the GigaAM path (mocked) and the default still routes to whisper.
+18. **whisper-decode-options** — the whisper call always passes
+    `condition_on_previous_text=True`, `temperature=(0.0, 0.2, 0.4)`
+    and `best_of=3`; it sends a style `initial_prompt` for the 30
+    mapped languages (`ru`/`en`/`zh`/`de` checked) and none for
+    `auto` or unmapped languages.
+19. **gigaam-chunking** — a 45 s buffer is decoded as three 20 s /
+    2 s-overlap windows (mocked model), midpoint stitching dedupes
+    overlap words, and a 5 s buffer stays one-shot.
+20. **warmup-retry** — a simulated warmup failure publishes a
     retryable ERROR with the hotkey watcher still armed; a synthetic
     Right Option press re-runs the warmup into READY.
-15. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
+21. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
     open raising `PortAudioError -9986` triggers one
     `sd._terminate()`/`sd._initialize()` cycle and a successful retry.
-16. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
+22. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
     cancel press; Cmd+Esc is filtered out.
-17. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
+23. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
     report durations.
 
 `dictate-mac warmup --skip-mic-test` is the deterministic "is it
@@ -625,18 +732,22 @@ would block forever in a headless context).
 
 ## 12. Known limitations
 
-- ~1.6 GB of RAM held permanently after first warmup **in local
-  mode** (steady-state footprint ~1.8-2.0 GB; transient decode
-  buffers peak briefly during recognition and are returned to the OS
-  via `mx.clear_cache()` right after). In API mode the warmup thread
-  is skipped entirely and
+- RAM held permanently after first warmup **in a local mode**:
+  ~1.6 GB for Whisper (steady-state footprint ~1.8-2.0 GB; transient
+  decode buffers peak briefly during recognition and are returned to
+  the OS via `mx.clear_cache()` right after), ~1.4 GB for GigaAM.
+  In API mode the warmup thread is skipped entirely and
   the local model is never loaded; switching from local to API via
   the menu triggers a restart that drops the previously-loaded
   weights.
+- GigaAM output is lowercase without punctuation (greedy CTC), and
+  the model supports only Russian, English, Kazakh, Kyrgyz and
+  Uzbek — pick Whisper or API for other languages or for
+  punctuation-rich output.
 - The bundled `.app` cannot transcode audio files: the
   `silero_vad.read_audio` and `torchaudio.load` paths raise
   `RuntimeError`. All production audio flows through
-  PortAudio → `numpy.ndarray` → silero-vad → Whisper.
+  PortAudio → `numpy.ndarray` → silero-vad → ASR backend.
 - Citrix Viewer needs **Send Unicode keyboard input** enabled
   (modern default). If Cyrillic drops, switch to
   `--output=osascript`.

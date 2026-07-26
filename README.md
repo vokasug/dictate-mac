@@ -1,9 +1,14 @@
 # dictate-mac 🎙️
 
-Voice dictation for macOS with **two ASR backends** selectable at runtime:
+Voice dictation for macOS with **three ASR backends** selectable at runtime:
 
-- **Local** — `mlx-community/whisper-large-v3-turbo` runs in-process via
-  MLX on Apple Silicon (~1.6 GB RAM, works fully offline).
+- **Local Whisper** — `mlx-community/whisper-large-v3-turbo` runs
+  in-process via MLX on Apple Silicon (~1.6 GB RAM, works fully
+  offline, 100 languages).
+- **Local GigaAM** — `ai-babai/gigaam-multilingual-mlx` (FP16), a
+  multilingual CTC model running in-process via MLX (~1.4 GB RAM,
+  fully offline, Russian / English / Kazakh / Kyrgyz / Uzbek
+  auto-detected).
 - **API** — any OpenAI-compatible `/v1/audio/transcriptions` endpoint
   (your gateway, a hosted service, …). No ASR model loaded; only audio
   is uploaded per recording.
@@ -13,7 +18,9 @@ Recognized text is typed character-by-character into the focused
 window — including Citrix Workspace sessions that don't share the
 clipboard.
 
-- 100 ISO-639-1 languages + `Auto-detect` — applies to both backends
+- 100 ISO-639-1 languages + `Auto-detect` — applies to the Whisper
+  and API backends (GigaAM detects its five languages on its own, so
+  the language menu is disabled while it is active)
 - Settings (including API credentials) persist at
   `~/.config/dictate-mac/config.json` with mode `0o600`; the API key
   is never logged
@@ -31,7 +38,7 @@ clipboard.
 - [Usage](#usage)
 - [The menu bar](#the-menu-bar)
 - [Recognition language](#recognition-language)
-- [Choosing your backend: Local vs API](#choosing-your-backend-local-vs-api)
+- [Choosing your backend: Whisper vs GigaAM vs API](#choosing-your-backend-whisper-vs-gigaam-vs-api)
 - [The config file](#the-config-file)
 - [CLI subcommands](#cli-subcommands)
 - [How it works](#how-it-works)
@@ -48,9 +55,10 @@ To *run* dictate-mac:
 - **macOS 13 Ventura** or newer
 - **8 GB RAM** or more
 - Any working microphone (the built-in one is fine)
-- ~284 MB for the `.app` itself, plus an optional ~1.5 GB for the local
-  Whisper weights (downloaded on first launch, only in **Local** mode;
-  **API** mode needs no extra disk)
+- ~285 MB for the `.app` itself, plus an optional ~1.5 GB for the
+  Whisper weights **or** ~1.2 GB for the GigaAM weights (downloaded on
+  first launch of the matching local mode; **API** mode needs no extra
+  disk)
 - Internet access only for the first local-model download — API mode
   needs none
 
@@ -70,14 +78,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.4.1-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.4.1-macos.zip)
+[`DictateMac-v0.5.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.5.0-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
 Compressed download is ~110–140 MB; the extracted `.app` is ~284 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.4.1-macos.zip
+shasum -a 256 DictateMac-v0.5.0-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -86,7 +94,7 @@ shasum -a 256 DictateMac-v0.4.1-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.4.1-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.5.0-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -109,8 +117,13 @@ fixes if any are still missing.
 
 ### 4. Pick your backend
 
-The default is **Local** — the in-process Whisper model. You don't
-have to do anything; the app works offline out of the box.
+The default is **Local Whisper** — the in-process Whisper model. You
+don't have to do anything; the app works offline out of the box.
+
+To use the GigaAM multilingual CTC model instead (strong for Russian,
+plus English / Kazakh / Kyrgyz / Uzbek), click the menu icon →
+**Model (changing will restart app)** → **Local GigaAM**. The app
+restarts and downloads the ~1.2 GB weights on first use.
 
 To use an external service instead:
 
@@ -122,18 +135,19 @@ To use an external service instead:
    endpoint and the model id. On success the values are saved and the
    daemon restarts so the API backend takes effect at boot.
 
-To switch back, pick **Local** in the same menu. See
-[Choosing your backend](#choosing-your-backend-local-vs-api) for
-full details on validation, error messages, and the config file.
+To switch back, pick **Local Whisper** in the same menu. See
+[Choosing your backend](#choosing-your-backend-whisper-vs-gigaam-vs-api)
+for full details on validation, error messages, and the config file.
 
 ### 5. Pick the language
 
 Click the menu bar icon → **Recognition language** → *Auto-detect*
 or any of the 100 ISO-639-1 codes. The choice persists and applies
-to the next recording (no model reload, applies to both backends).
-For the API backend the chosen language is also forwarded as a
-`language` form field on every request, so the gateway skips its own
-detection.
+to the next recording (no model reload, applies to the Whisper and
+API backends). For the API backend the chosen language is also
+forwarded as a `language` form field on every request, so the gateway
+skips its own detection. In **GigaAM** mode this menu is disabled —
+the model auto-detects its five supported languages on its own.
 
 ### 6. Use
 
@@ -225,7 +239,8 @@ top-right.
 Status: Ready — press Right Option to start and stop recording
 ─────────────────
 Model (changing will restart app)
-✓ Local (mlx-community/whisper-large-v3-turbo)
+✓ Local Whisper (mlx-community/whisper-large-v3-turbo)
+  Local GigaAM (ai-babai/gigaam-multilingual-mlx)
   API (https://<your-host>/v1)
 ─────────────────
 Recognition language: Auto-detect
@@ -245,7 +260,8 @@ Quit
 | -------------------------- | --------------------------------------------------- |
 | `Status: <state>`          | Disabled, read-only. Updated every 0.5 s.            |
 | `Model (changing will restart app)` | Disabled, descriptive header.                        |
-| `Local (...)`              | Clickable. Switches to the local mlx-whisper backend and restarts the daemon. Persists to `~/.config/dictate-mac/config.json`. |
+| `Local Whisper (...)`      | Clickable. Switches to the local mlx-whisper backend and restarts the daemon. Persists to `~/.config/dictate-mac/config.json`. |
+| `Local GigaAM (...)`       | Clickable. Switches to the local GigaAM multilingual CTC backend and restarts the daemon. The Recognition-language menu is disabled while this backend is active (the model has no language parameter). |
 | `API (<endpoint>)`         | Clickable. Opens the API credentials dialog (Endpoint / API key / Model ID). On a successful OK the dialog GETs `<endpoint>/models` to verify the endpoint + model id, persists the values, switches the active backend to API, and restarts the daemon. |
 | `Recognition language: <X>`| Clickable. Opens a submenu of `Auto-detect` and the 100 ISO-639-1 languages Whisper supports. Selecting one persists the choice and applies to the next recording (no restart). |
 | `Permissions (… )` header  | Disabled, descriptive label.                        |
@@ -260,10 +276,12 @@ Quit
 `<state>` reflects the live daemon state:
 
 - `Starting…` — process launched, running import-time setup.
-- `Downloading whisper model…` — first-run HF download (skipped in
-  API mode and on subsequent local launches).
-- `Loading whisper into RAM…` — model weights are being loaded
-  (~30–60 s cold, ~2 s from cache). Skipped in API mode.
+- `Downloading whisper model…` / `Downloading GigaAM model…` —
+  first-run HF download of the active local backend (skipped in
+  API mode and on subsequent launches).
+- `Loading whisper into RAM…` / `Loading GigaAM into RAM…` — model
+  weights are being loaded (~30–60 s cold, ~2 s from cache).
+  Skipped in API mode.
 - `Ready` — Right Option is armed. silero-vad is NOT pre-loaded here
   — it warms up lazily on the first recording.
 - `Recording…` — recording is in progress.
@@ -285,19 +303,22 @@ The choice is persisted between launches — no restart, no model
 reload. For the API backend the language is forwarded as the
 `language` form field on every `POST /v1/audio/transcriptions` request
 so the gateway skips its own detection. With `Auto-detect` selected
-the field is omitted.
+the field is omitted. The menu is disabled while the **GigaAM**
+backend is active: GigaAM is a fixed multilingual CTC model
+(Russian / English / Kazakh / Kyrgyz / Uzbek) with no language
+parameter — it detects the language from the audio itself.
 
 The submenu lists `Auto-detect` first, then the 100 ISO-639-1
 languages Whisper supports, sorted alphabetically by their English
 display name (`Russian`, `English`, `German`, …).
 
-## Choosing your backend: Local vs API
+## Choosing your backend: Whisper vs GigaAM vs API
 
-The two backends share the same audio pipeline (PortAudio →
+The three backends share the same audio pipeline (PortAudio →
 silero-vad → trimmed buffer) — the only difference is what happens
 in the **Transcribing** step.
 
-### Local
+### Local Whisper
 
 - **What it does:** runs the in-process mlx-whisper
   (`mlx-community/whisper-large-v3-turbo`).
@@ -307,9 +328,41 @@ in the **Transcribing** step.
 - **Disk:** ~1.5 GB Whisper weights downloaded on first launch to
   `~/.cache/huggingface/hub/`. Cached for subsequent launches.
 - **Network:** none after the first download — works fully offline.
+- **Languages:** 100 ISO-639-1 languages + auto-detect, selectable
+  in the Recognition-language menu.
+- **Output:** punctuation and capitalization included. Recognition
+  style stays consistent across long recordings: previous-window
+  text conditions the next window, the decode retries low-confidence
+  windows at temperatures 0.2/0.4 (best of 3 trajectories), and a
+  per-language style prompt steers punctuation and capitalization
+  when one of the 30 supported languages is pinned in the language
+  menu.
 - **Speed:** ~3 s per recording on M1.
-- **Restart on switch:** clicking **API** in the menu restarts the
-  daemon (the new backend takes effect at boot).
+- **Restart on switch:** clicking another backend in the menu
+  restarts the daemon (the new backend takes effect at boot).
+
+### Local GigaAM
+
+- **What it does:** runs the in-process GigaAM multilingual CTC
+  model (`ai-babai/gigaam-multilingual-mlx`, FP16 artifact) via the
+  `gigaam-multilingual-mlx` package.
+- **Cost:** ~1.4 GB RAM permanently after first warmup.
+- **Disk:** ~1.2 GB weights downloaded on first launch to
+  `~/.cache/huggingface/hub/`. Cached for subsequent launches.
+- **Network:** none after the first download — works fully offline.
+- **Languages:** Russian, English, Kazakh, Kyrgyz, Uzbek —
+  auto-detected per recording; the Recognition-language menu is
+  disabled in this mode.
+- **Output:** lowercase text without punctuation (CTC greedy
+  decoding). Significantly faster than Whisper on the core
+  languages in the model's published benchmark.
+- **Long dictations:** buffers longer than 20 s are decoded in
+  overlapping 20-second windows and stitched automatically (the
+  model is trained on short utterances, so this keeps quality
+  stable on multi-minute recordings). Rare duplicated words can
+  appear at window boundaries.
+- **Restart on switch:** same as Whisper — a menu click restarts
+  the daemon.
 
 ### API
 
@@ -336,7 +389,7 @@ in the **Transcribing** step.
 
   The API key is **never** logged or written into any error message —
   only the endpoint, HTTP status, and a truncated response body.
-- **Switching back to Local** does **not** erase the saved
+- **Switching back to a local backend** does **not** erase the saved
   credentials — they stay on disk for re-enabling later.
 - **Language forwarding:** when a language is set in the menu it's
   sent as the `language` form field on every API request, so the
@@ -385,8 +438,9 @@ Schema v2 contents look like:
 
 - `_v` is the schema version (currently `2`).
 - `language` is either an ISO-639-1 code (`"ru"`, `"en"`, …) or the
-  sentinel `"auto"`.
-- `model_kind` is `"local"` (default) or `"api"`.
+  sentinel `"auto"`. Ignored while `model_kind` is `"gigaam"`.
+- `model_kind` is `"local"` (default, Whisper), `"gigaam"`, or
+  `"api"`.
 - The remaining three fields are only meaningful with
   `model_kind=api`.
 
@@ -412,24 +466,28 @@ binary and the source venv:
 | Subcommand | Purpose                                                                  |
 | ---------- | ------------------------------------------------------------------------ |
 | `daemon`   | Plain CLI daemon (no menu bar). Same code path, logs to stderr.          |
-| `warmup`   | Download the local model (if needed), load it, then exit.                |
+| `warmup`   | Download the selected local model (if needed), load it, then exit.       |
 | `selftest` | Headless smoke checks; `--no-mic` skips the mic roundtrip.              |
 
 Common flags (before or after the subcommand): `--quiet`,
 `--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}`,
 `--output {quartz,osascript}`, `--language {auto|<iso-639-1>}`,
-`--model-kind {local,api}`, `--api-endpoint <url>`, `--api-key <key>`,
-`--model-id <id>`. The last four are meaningful only with
-`--model-kind=api`; `daemon` refuses to start without the three
-required values when `api` is selected. CLI runs do not read or
-write the persisted config file — language and ASR settings are
-taken from flags directly.
+`--model-kind {local,gigaam,api}`, `--api-endpoint <url>`,
+`--api-key <key>`, `--model-id <id>`. The last three are meaningful
+only with `--model-kind=api`; `daemon` refuses to start without the
+three required values when `api` is selected. `--language` is ignored
+with `--model-kind=gigaam` (the model auto-detects its five
+languages). CLI runs do not read or write the persisted config file —
+language and ASR settings are taken from flags directly.
 
 Examples:
 
 ```bash
-# Local backend, Russian, this CLI session only (config file untouched):
+# Local Whisper backend, Russian, this CLI session only (config file untouched):
 dictate-mac daemon --language=ru
+
+# Local GigaAM backend (Russian auto-detected by the model):
+dictate-mac daemon --model-kind=gigaam
 
 # Auto-detect for this CLI session (default):
 dictate-mac daemon
@@ -440,6 +498,9 @@ dictate-mac daemon \
   --api-endpoint=https://<your-host>/v1 \
   --api-key=<your-bearer-token> \
   --model-id=<your-model-id>
+
+# Pre-download the GigaAM weights without starting the daemon:
+dictate-mac warmup --model-kind=gigaam --skip-mic-test
 ```
 
 When the bundled `.app` is the entry point, the same subcommands are
@@ -470,10 +531,10 @@ opens the log file in your default `.log` viewer (Console.app).
 │            DictationMachine (asyncio worker thread)               │
 │            recorder · silero-vad · ASR backend · typer           │
 │                              │                                   │
-│                    ┌─────────┴─────────┐                         │
-│                    ▼                   ▼                         │
-│            mlx-whisper (local)   POST /v1/audio/transcriptions  │
-│            ~1.6 GB RAM           bearer + model id (api)         │
+│          ┌───────────────────┼─────────────────┐                 │
+│          ▼                   ▼                 ▼                 │
+│   mlx-whisper (local)  GigaAM CTC (local)  POST /v1/audio/      │
+│   ~1.6 GB RAM          ~1.4 GB RAM         transcriptions (api)  │
 │                                                                   │
 │                          │ text                                  │
 │                          ▼                                       │
@@ -492,13 +553,15 @@ primitives.
 The ASR backend is selected at startup from the config file's
 `model_kind` field. In **local** mode the daemon downloads the
 Whisper model (if not cached) and loads it into RAM before arming
-the hotkey; status reaches `Ready` only after that completes. In
+the hotkey; **gigaam** mode does the same with the GigaAM artifact.
+Status reaches `Ready` only after that completes. In
 **API** mode the local-model load is skipped, `Status: Ready`
 arrives within a second, and audio is POSTed to the configured
 gateway per recording. silero-vad's ONNX model loads lazily on
-the first recording. Local-mode recognitions take ~3 s on M1;
-API-mode recognitions take only the round-trip time to the gateway
-(typically 0.3–1 s).
+the first recording. Whisper recognitions take ~3 s on M1;
+GigaAM recognitions are typically faster on its five supported
+languages; API-mode recognitions take only the round-trip time
+to the gateway (typically 0.3–1 s).
 
 ## Verifying & troubleshooting
 
@@ -512,15 +575,17 @@ dictate-mac selftest --no-mic   # skip the microphone roundtrip
 If you installed via the `.app` rather than from a venv, the same
 subcommands are reachable via the bundle's executable
 (`/Applications/DictateMac.app/Contents/MacOS/DictateMac selftest`).
-Exit code 0 if all 16 checks pass, 1 otherwise. Each check prints a
+Exit code 0 if all 22 checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail; the checks are
 `model-load`, `vad-silence`, `vad-speech-like`, `asr-smoke`,
-`typer-dispatch`, `ssl-certifi`, `config-v1-migration`,
-`config-invalid-endpoint`, `config-api-required-when-api`,
+`gigaam-model-load`, `gigaam-asr-smoke`, `typer-dispatch`,
+`ssl-certifi`, `config-v1-migration`, `config-invalid-endpoint`,
+`config-api-required-when-api`, `config-gigaam-kind`,
 `audio-wav-roundtrip`, `api-transcribe-headers`,
-`api-transcribe-auto-language`, `api-models-check`, `warmup-retry`,
-`recorder-portaudio-retry`, `hotkey-escape-event`, plus an optional
-`mic-roundtrip`.
+`api-transcribe-auto-language`, `api-models-check`, `gigaam-dispatch`,
+`whisper-decode-options`, `gigaam-chunking`, `warmup-retry`,
+`recorder-portaudio-retry`, `hotkey-escape-event`,
+plus an optional `mic-roundtrip`.
 
 **FAQ:**
 
@@ -533,7 +598,7 @@ PASS/FAIL line with a one-line detail; the checks are
 | `Model download failed — press Right Option to retry` | The first-run download failed (no network, DNS/VPN hiccup, HF outage) | Bring the network up and press **Right Option** — the warmup re-runs without an app restart. Check the log via **Open log** if it keeps failing. |
 | `mlx` fails to install / load | Python 3.14 (no wheel) | Recreate venv: `uv venv --python 3.13 .venv --force && uv pip install -e .` |
 | API mode returns HTTP 429 | The OpenAI-compatible gateway is rate-limiting | Some gateways (e.g. `whisper-large-v3-turbo`) have a 1-request-per-10-15-seconds cap on certain upstream providers. Switch the menu to a different model id, or to Local if the same model is acceptable. |
-| Too much RAM usage | Local backend occupies ~1.5 GB permanently | API mode doesn't load any ASR weights; switch if RAM is tight. |
+| Too much RAM usage | A local backend occupies ~1.4-1.6 GB permanently | API mode doesn't load any ASR weights; switch if RAM is tight. |
 
 ## Uninstall & known limitations
 
@@ -543,9 +608,10 @@ PASS/FAIL line with a one-line detail; the checks are
 rm -rf ~/dictate-mac
 rm -rf /Applications/DictateMac.app      # only if you copied it there
 
-# 3. Remove logs and optional local model cache (~1.5 GB)
+# 3. Remove logs and optional local model caches (~1.5 GB + ~1.2 GB)
 rm -rf ~/Library/Logs/dictate-mac
 rm -rf ~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo
+rm -rf ~/.cache/huggingface/hub/models--ai-babai--gigaam-multilingual-mlx
 ```
 
 You can leave the granted Privacy & Security permissions in place —
@@ -555,10 +621,15 @@ revoke `com.local.dictate-mac` in
 
 **Known limitations:**
 
-- ~1.5 GB RAM is held permanently after the first startup **when
-  using the local backend**. The API backend doesn't load any ASR
-  weights into memory; its startup is instantaneous and can run on
-  Mac models where the mlx weights aren't downloaded.
+- RAM is held permanently after the first startup **when using a
+  local backend**: ~1.6 GB for Whisper, ~1.4 GB for GigaAM. The API
+  backend doesn't load any ASR weights into memory; its startup is
+  instantaneous and can run on Mac models where the mlx weights
+  aren't downloaded.
+- GigaAM emits lowercase text without punctuation (greedy CTC
+  decoding) and supports only Russian, English, Kazakh, Kyrgyz and
+  Uzbek — use Whisper or API for other languages or for
+  punctuation-rich output.
 - macOS TCC permissions (Microphone, Accessibility, Input Monitoring)
   must be granted manually. With the bundled `DictateMac.app` they
   go to `com.local.dictate-mac`; with the menu-bar app run from
@@ -575,8 +646,8 @@ revoke `com.local.dictate-mac` in
 - The hotkey tap stays disabled if Input Monitoring was not granted
   before launch. Grant it in System Settings → Privacy & Security →
   Input Monitoring, then Quit + reopen DictateMac.
-- Switching the ASR backend (**Local** ↔ **API**) always triggers
-  a restart. The menu click is automatic.
+- Switching the ASR backend (**Local Whisper** ↔ **Local GigaAM** ↔
+  **API**) always triggers a restart. The menu click is automatic.
 - Python 3.13.x only; 3.14 is unsupported because `mlx` does not yet
   ship a wheel for it.
 - The bundled `.app` cannot transcode audio files

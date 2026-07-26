@@ -29,6 +29,7 @@ from dictate_mac import __version__
 from dictate_mac.config import (
     MODEL_KINDS,
     MODEL_KIND_API,
+    MODEL_KIND_GIGAAM,
     MODEL_KIND_LOCAL,
     normalize_endpoint,
 )
@@ -89,7 +90,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=MODEL_KIND_LOCAL,
         help=(
             "ASR backend. 'local' (default) runs mlx-whisper "
-            "in-process. 'api' POSTs 16 kHz mono WAVs to a "
+            "in-process. 'gigaam' runs the GigaAM multilingual CTC "
+            "model in-process (ru/en/kk/ky/uz; ignores --language). "
+            "'api' POSTs 16 kHz mono WAVs to a "
             "OpenAI-compatible endpoint; requires --api-endpoint, "
             "--api-key and --model-id. The CLI does NOT verify the "
             "endpoint at startup — failures surface in the log on "
@@ -160,10 +163,12 @@ def _build_parser() -> argparse.ArgumentParser:
     warmup = sub.add_parser(
         "warmup",
         help=(
-            "Download the mlx-whisper model into the Hugging Face cache "
-            "and (optionally) run a microphone sanity check. Exits 0 on "
+            "Download the selected local model (whisper or GigaAM, "
+            "see --model-kind) into the Hugging Face cache and "
+            "(optionally) run a microphone sanity check. Exits 0 on "
             "success."
         ),
+        parents=[common],
     )
     warmup.add_argument(
         "--skip-mic-test",
@@ -218,13 +223,29 @@ def _configure_logging(level: str) -> None:
     configure_logging(level=level)
 
 
-def _download_model() -> Path:
-    """Trigger the Hugging Face download for mlx-community/whisper-large-v3-turbo.
+def _download_model(model_kind: str = MODEL_KIND_LOCAL) -> Path:
+    """Trigger the Hugging Face download for the selected local model.
 
-    mlx-whisper itself downloads weights lazily; we use ``huggingface_hub``
-    so the download progress is visible and resumable.
+    mlx-whisper and gigaam-multilingual-mlx both download weights
+    lazily; we use ``huggingface_hub`` so the download progress is
+    visible and resumable.
     """
     from huggingface_hub import snapshot_download
+
+    if model_kind == MODEL_KIND_GIGAAM:
+        from dictate_mac.transcriber import _gigaam_repo_revision
+
+        repo_id, revision = _gigaam_repo_revision()
+        logger.info("downloading %s (revision %s) …", repo_id, revision)
+        local_dir = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                revision=revision,
+                allow_patterns=["config.json", "manifest.json", "model.safetensors"],
+            )
+        )
+        logger.info("model ready at %s", local_dir)
+        return local_dir
 
     repo_id = "mlx-community/whisper-large-v3-turbo"
     logger.info("downloading %s …", repo_id)
@@ -256,11 +277,17 @@ def _mic_test(seconds: float) -> None:
 
 
 def cmd_warmup(args: argparse.Namespace) -> int:
-    _download_model()
+    if args.model_kind == MODEL_KIND_API:
+        print(
+            "dictate-mac warmup: --model-kind=api has no local model to warm",
+            file=sys.stderr,
+        )
+        return 2
+    _download_model(args.model_kind)
     # Pre-load the model into RAM so the first real dictation is fast.
     from dictate_mac.transcriber import warm
 
-    warm()
+    warm(args.model_kind)
     if not args.skip_mic_test:
         try:
             _mic_test(args.mic_test_seconds)

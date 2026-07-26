@@ -65,8 +65,9 @@ logger = logging.getLogger("dictate_mac.config")
 SCHEMA_VERSION = 2
 AUTO = "auto"
 MODEL_KIND_LOCAL = "local"
+MODEL_KIND_GIGAAM = "gigaam"
 MODEL_KIND_API = "api"
-MODEL_KINDS = (MODEL_KIND_LOCAL, MODEL_KIND_API)
+MODEL_KINDS = (MODEL_KIND_LOCAL, MODEL_KIND_GIGAAM, MODEL_KIND_API)
 
 LANGUAGES: Dict[str, str] = {
     "en": "english", "zh": "chinese", "de": "german", "es": "spanish",

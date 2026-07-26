@@ -31,9 +31,11 @@ import numpy as np
 from dictate_mac.audio import SAMPLE_RATE, Recorder, trim_silence
 from dictate_mac.transcriber import (
     MODEL_KIND_API,
+    MODEL_KIND_GIGAAM,
     _audio_to_wav_bytes,
     _transcribe_api,
     check_api_model_available,
+    gigaam_loaded,
     model_loaded,
     transcribe,
     warm,
@@ -148,6 +150,32 @@ def test_asr_smoke(language: str = "auto") -> Result:
         True,
         f"transcribe(language={language!r}) returned a {len(text)}-char "
         f"string in {dt:.2f}s "
+        "(content is not asserted — synthetic signal is not real speech)",
+    )
+
+
+def test_gigaam_model_load() -> Result:
+    t0 = time.perf_counter()
+    warm(MODEL_KIND_GIGAAM)
+    dt = time.perf_counter() - t0
+    if not gigaam_loaded():
+        return Result("gigaam-model-load", False, "gigaam model not loaded after warm()")
+    return Result("gigaam-model-load", True, f"loaded in {dt:.2f}s")
+
+
+def test_gigaam_asr_smoke() -> Result:
+    audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.8)
+    t0 = time.perf_counter()
+    text = transcribe(audio, model_kind=MODEL_KIND_GIGAAM)
+    dt = time.perf_counter() - t0
+    if not isinstance(text, str):
+        return Result(
+            "gigaam-asr-smoke", False, f"expected str, got {type(text).__name__}"
+        )
+    return Result(
+        "gigaam-asr-smoke",
+        True,
+        f"gigaam transcribe returned a {len(text)}-char string in {dt:.2f}s "
         "(content is not asserted — synthetic signal is not real speech)",
     )
 
@@ -394,6 +422,55 @@ def test_config_missing_api_fields_when_kind_local() -> Result:
         "config-api-required-when-api",
         True,
         "local kind accepts empty API fields; api kind rejects partial fields",
+    )
+
+
+def test_config_gigaam_kind_valid() -> Result:
+    """model_kind='gigaam' is a first-class kind: is_valid accepts it
+    with empty API fields, and a save/load roundtrip preserves it."""
+    from dictate_mac import config as config_mod
+    from dictate_mac.config import PersistedSettings
+
+    if config_mod.MODEL_KIND_GIGAAM not in config_mod.MODEL_KINDS:
+        return Result(
+            "config-gigaam-kind",
+            False,
+            "MODEL_KIND_GIGAAM missing from MODEL_KINDS",
+        )
+
+    s = PersistedSettings(model_kind=config_mod.MODEL_KIND_GIGAAM, language="ru")
+    if not s.is_valid():
+        return Result(
+            "config-gigaam-kind",
+            False,
+            "gigaam kind with empty API fields should be valid",
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "config.json"
+        original = config_mod.config_path
+        try:
+            config_mod.config_path = lambda: target
+            config_mod.save(s)
+            loaded = config_mod.load()
+        finally:
+            config_mod.config_path = original
+        if loaded.model_kind != config_mod.MODEL_KIND_GIGAAM:
+            return Result(
+                "config-gigaam-kind",
+                False,
+                f"roundtrip lost model_kind: {loaded.model_kind!r}",
+            )
+        if loaded.language != "ru":
+            return Result(
+                "config-gigaam-kind",
+                False,
+                f"roundtrip lost language: {loaded.language!r}",
+            )
+    return Result(
+        "config-gigaam-kind",
+        True,
+        "gigaam kind valid without API fields; save/load roundtrip preserves it",
     )
 
 
@@ -707,6 +784,210 @@ def test_models_endpoint_check_accepts_and_rejects() -> Result:
     )
 
 
+def test_gigaam_dispatch() -> Result:
+    """transcribe(model_kind='gigaam') routes to the GigaAM path and
+    ignores the language argument; whisper/api routing is untouched."""
+    import dictate_mac.transcriber as t
+
+    calls: dict = {}
+
+    def fake_gigaam(audio: np.ndarray) -> str:
+        calls["gigaam"] = audio.size
+        return "gigaam-text"
+
+    def fake_local(audio: np.ndarray, language: str) -> str:
+        calls["local"] = language
+        return "local-text"
+
+    real_gigaam, real_local = t._transcribe_gigaam, t._transcribe_local
+    try:
+        t._transcribe_gigaam = fake_gigaam
+        t._transcribe_local = fake_local
+        audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.5)
+
+        out = t.transcribe(audio, language="ru", model_kind=t.MODEL_KIND_GIGAAM)
+        if out != "gigaam-text" or calls.get("gigaam") != audio.size:
+            return Result(
+                "gigaam-dispatch",
+                False,
+                f"gigaam path not hit: out={out!r} calls={calls}",
+            )
+        if "local" in calls:
+            return Result(
+                "gigaam-dispatch",
+                False,
+                "whisper path was invoked for model_kind='gigaam'",
+            )
+
+        calls.clear()
+        out = t.transcribe(audio, language="ru")
+        if out != "local-text" or calls.get("local") != "ru":
+            return Result(
+                "gigaam-dispatch",
+                False,
+                f"default whisper routing broken: out={out!r} calls={calls}",
+            )
+    finally:
+        t._transcribe_gigaam, t._transcribe_local = real_gigaam, real_local
+
+    return Result(
+        "gigaam-dispatch",
+        True,
+        "model_kind='gigaam' routes to GigaAM; default still routes to whisper",
+    )
+
+
+def test_whisper_decode_options() -> Result:
+    """The whisper path pins its decode options: coptt=True for style
+    continuity, a trimmed (0.0, 0.2, 0.4) fallback ladder, best_of=3,
+    and a style prompt for the 30 mapped languages only."""
+    import dictate_mac.transcriber as t
+
+    captured: dict = {}
+
+    def fake_transcribe(audio, **kwargs):
+        captured.update(kwargs)
+        return {"text": "ok", "segments": []}
+
+    real_mlx = None
+    try:
+        import mlx_whisper
+
+        real_mlx = mlx_whisper.transcribe
+        mlx_whisper.transcribe = fake_transcribe
+
+        audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.5)
+        cases = (
+            ("ru", True), ("en", True), ("zh", True), ("de", True),
+            ("auto", False), ("is", False),  # "is" is outside the top-30 map
+        )
+        for language, expect_prompt in cases:
+            captured.clear()
+            t._transcribe_local_mlx(audio, language)
+            if captured.get("condition_on_previous_text") is not True:
+                return Result(
+                    "whisper-decode-options",
+                    False,
+                    f"language={language}: condition_on_previous_text="
+                    f"{captured.get('condition_on_previous_text')!r} (expected True)",
+                )
+            if tuple(captured.get("temperature") or ()) != (0.0, 0.2, 0.4):
+                return Result(
+                    "whisper-decode-options",
+                    False,
+                    f"language={language}: temperature="
+                    f"{captured.get('temperature')!r} (expected (0.0, 0.2, 0.4))",
+                )
+            if captured.get("best_of") != 3:
+                return Result(
+                    "whisper-decode-options",
+                    False,
+                    f"language={language}: best_of={captured.get('best_of')!r} (expected 3)",
+                )
+            prompt = captured.get("initial_prompt")
+            if expect_prompt and not prompt:
+                return Result(
+                    "whisper-decode-options",
+                    False,
+                    f"language={language}: expected a style prompt, got {prompt!r}",
+                )
+            if not expect_prompt and prompt is not None:
+                return Result(
+                    "whisper-decode-options",
+                    False,
+                    f"language={language}: expected no prompt, got {prompt!r}",
+                )
+    finally:
+        if real_mlx is not None:
+            import mlx_whisper
+
+            mlx_whisper.transcribe = real_mlx
+
+    return Result(
+        "whisper-decode-options",
+        True,
+        "coptt=True + ladder (0.0,0.2,0.4) + best_of=3; style prompt "
+        "for the 30 mapped languages only",
+    )
+
+
+def test_gigaam_chunking() -> Result:
+    """A >20 s buffer is decoded in 20 s/2 s-overlap windows; words in
+    overlap regions are kept only in the window holding their midpoint."""
+    import mlx.core as mx
+
+    import dictate_mac.transcriber as t
+
+    class _Config:
+        vocabulary = [" ", "a", "b"]
+
+    class _FakeGigaam:
+        def __init__(self) -> None:
+            self.config = _Config()
+            self.calls: list[tuple[int, int]] = []  # (ndim, samples)
+
+        def __call__(self, audio, lengths=None):
+            self.calls.append((audio.ndim, int(audio.shape[-1])))
+            enc = int(audio.shape[-1]) // 640  # 16k / (hop 160 * subs 4)
+            return (
+                mx.zeros((1, enc, 3), dtype=mx.float32),
+                mx.array([enc], dtype=mx.int32),
+            )
+
+        def greedy_decode(self, logits, lengths):
+            # word "b" at frame 5 (mid ~0.2 s — inside the overlap,
+            # kept only by the first window), word "a" at frame 100
+            # (mid ~4 s — kept by every window).
+            return [{"text": "b a", "token_ids": [2, 0, 1], "token_frames": [5, 50, 100]}]
+
+    fake = _FakeGigaam()
+    real_load = t._load_gigaam
+    try:
+        t._load_gigaam = lambda: fake
+        sr = 16000
+        out = t._transcribe_gigaam(np.zeros(45 * sr, dtype=np.float32))
+        # 45 s → windows [0,20), [18,38), [36,45) — 3 calls.
+        sizes = [n for _, n in fake.calls]
+        if sizes != [20 * sr, 20 * sr, 9 * sr]:
+            return Result(
+                "gigaam-chunking",
+                False,
+                f"unexpected window sizes: {sizes} (expected [320000, 320000, 144000])",
+            )
+        if out != "b a a a":
+            return Result(
+                "gigaam-chunking",
+                False,
+                f"stitch wrong: {out!r} (expected 'b a a a' — overlap word "
+                "'b' kept only once)",
+            )
+        if any(ndim != 2 for ndim, _ in fake.calls):
+            return Result(
+                "gigaam-chunking",
+                False,
+                "chunk windows must be decoded as batched (1, N) input",
+            )
+
+        fake.calls.clear()
+        out = t._transcribe_gigaam(np.zeros(5 * sr, dtype=np.float32))
+        sizes = [n for _, n in fake.calls]
+        if sizes != [5 * sr] or out != "b a":
+            return Result(
+                "gigaam-chunking",
+                False,
+                f"short buffer must stay one-shot: calls={sizes} out={out!r}",
+            )
+    finally:
+        t._load_gigaam = real_load
+
+    return Result(
+        "gigaam-chunking",
+        True,
+        "45 s → 3 windows [20 s + 2 s overlap]; midpoint stitch dedupes "
+        "overlap words; 5 s stays one-shot",
+    )
+
+
 def test_warmup_failure_retryable() -> Result:
     """A failed warmup must not be terminal: the machine publishes a
     retryable ERROR with the hotkey watcher still armed, and the next
@@ -719,10 +1000,10 @@ def test_warmup_failure_retryable() -> Result:
 
     calls = {"warm": 0}
 
-    def fake_is_cached() -> bool:
+    def fake_is_cached(model_kind: str = "local") -> bool:
         return True
 
-    def fake_ensure_warm(on_phase=None):
+    def fake_ensure_warm(on_phase=None, model_kind: str = "local"):
         calls["warm"] += 1
         if on_phase is not None:
             if calls["warm"] == 1:
@@ -936,15 +1217,21 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_vad_silence,
         test_vad_speech_like,
         lambda: test_asr_smoke(language=language),
+        test_gigaam_model_load,
+        test_gigaam_asr_smoke,
         test_typer_dispatch,
         test_ssl_certifi_on_disk,
         test_config_v1_migration_keeps_language,
         test_config_invalid_endpoint_rejected,
         test_config_missing_api_fields_when_kind_local,
+        test_config_gigaam_kind_valid,
         test_audio_to_wav_bytes_round_trip,
         test_api_transcribe_sends_model_id_and_bearer,
         test_api_transcribe_omits_language_when_auto,
         test_models_endpoint_check_accepts_and_rejects,
+        test_gigaam_dispatch,
+        test_whisper_decode_options,
+        test_gigaam_chunking,
         test_warmup_failure_retryable,
         test_recorder_portaudio_retry,
         test_hotkey_escape_event,
@@ -957,6 +1244,7 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         try:
             r = t()
         except Exception as exc:  # noqa: BLE001
+            logger.exception("check %s raised", t.__name__)
             r = Result(t.__name__, False, f"raised: {exc}")
         results.append(r)
     return results

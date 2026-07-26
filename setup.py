@@ -473,6 +473,18 @@ def _extract_native_runtime_libs(app_dist: Path) -> None:
         # not find a cached .pyc that imports numba.
         "mlx_whisper/": "remove",
         "mlx_whisper-": "remove",
+        # gigaam_multilingual_mlx is a pure-Python package mirrored on
+        # disk via OPTIONS['packages']; drop the zip copy so ZipImporter
+        # cannot shadow the on-disk mirror.
+        "gigaam_multilingual_mlx/": "remove",
+        "gigaam_multilingual_mlx-": "remove",
+        # psutil is only imported by gigaam's file-transcription
+        # service module, which _strip_bundle_junk removes from the
+        # runtime path — nothing left imports it. psutil ships a C
+        # extension that cannot load from inside the zip anyway, so
+        # drop the entries entirely.
+        "psutil/": "remove",
+        "psutil-": "remove",
         # onnxruntime's pybind11_state.so + libonnxruntime.dylib must
         # live on disk (dlopen() can't read into a zip), and the rest
         # of the package follows for consistency. The on-disk mirror
@@ -1221,6 +1233,29 @@ def _strip_bundle_junk(app_dist: Path) -> None:
         ("huggingface_hub/inference", "HF Inference API client"),
         ("huggingface_hub/serialization", "HF save/load model helpers"),
         ("huggingface_hub/hub_mixin.py", "user-class Mixin (we don't subclass)"),
+        # gigaam_multilingual_mlx — keep only the runtime modules the
+        # dictation path imports: __init__ / _version / model / config /
+        # artifacts / quantization. Drop the CLI, the local HTTP server,
+        # the file-transcription service (the only psutil importer),
+        # the ffmpeg audio decoder, and the benchmark/conversion
+        # tooling — none of them are reachable from dictate_mac.
+        ("gigaam_multilingual_mlx/__main__.py", "gigaam __main__ entry"),
+        ("gigaam_multilingual_mlx/cli.py", "gigaam CLI"),
+        ("gigaam_multilingual_mlx/dev_cli.py", "gigaam dev CLI"),
+        ("gigaam_multilingual_mlx/server.py", "gigaam HTTP server"),
+        ("gigaam_multilingual_mlx/openai_schema.py", "gigaam server schemas"),
+        ("gigaam_multilingual_mlx/service.py", "gigaam file service (psutil)"),
+        ("gigaam_multilingual_mlx/outputs.py", "gigaam SRT/VTT writers"),
+        ("gigaam_multilingual_mlx/audio.py", "gigaam ffmpeg decoder"),
+        ("gigaam_multilingual_mlx/normalization.py", "gigaam text normalizer"),
+        ("gigaam_multilingual_mlx/convert.py", "gigaam torch converter"),
+        ("gigaam_multilingual_mlx/evaluate.py", "gigaam jiwer evaluator"),
+        ("gigaam_multilingual_mlx/parity.py", "gigaam parity checker"),
+        ("gigaam_multilingual_mlx/reports.py", "gigaam benchmark reports"),
+        ("gigaam_multilingual_mlx/multilingual_benchmark.py", "gigaam benchmark"),
+        ("gigaam_multilingual_mlx/parakeet_benchmark.py", "gigaam benchmark"),
+        ("gigaam_multilingual_mlx/whisper_benchmark.py", "gigaam benchmark"),
+        ("gigaam_multilingual_mlx/pytorch_benchmark.py", "gigaam benchmark"),
     ]
 
     # Top-level dist-info directories to drop. Matched by prefix.
@@ -1607,6 +1642,9 @@ def main() -> None:
             "dictate_mac",
             "mlx",
             "mlx_whisper",
+            # GigaAM multilingual CTC backend — pure MLX, no heavy
+            # transitive imports (huggingface_hub + numpy only).
+            "gigaam_multilingual_mlx",
             "silero_vad",
             "silero_vad.data",
             "sounddevice",

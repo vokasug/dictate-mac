@@ -50,6 +50,7 @@ import numpy as np
 from dictate_mac.audio import Recorder, trim_silence
 from dictate_mac.config import (
     MODEL_KIND_API,
+    MODEL_KIND_GIGAAM,
     MODEL_KIND_LOCAL,
 )
 from dictate_mac.hotkey import (
@@ -232,9 +233,16 @@ class DictationMachine:
             self._warmup_done.set()
             return
 
-        if is_model_cached():
+        kind = self._settings.model_kind
+        if is_model_cached(kind):
             await self._publish_state(
                 State.LOADING_MODEL, "[warmup] loading model from cache"
+            )
+        elif kind == MODEL_KIND_GIGAAM:
+            await self._publish_state(
+                State.DOWNLOADING_MODEL,
+                "[warmup] downloading ai-babai/gigaam-multilingual-mlx "
+                "(first run; ~1.2 GB)",
             )
         else:
             await self._publish_state(
@@ -248,7 +256,7 @@ class DictationMachine:
 
         # Idempotent — a second call while a warmup is in flight is a
         # no-op and returns the existing thread.
-        ensure_warm_async(on_phase=_on_phase)
+        ensure_warm_async(on_phase=_on_phase, model_kind=kind)
 
         # Poll the cross-thread completion flag instead of awaiting an
         # asyncio.Event set from the other thread — the latter requires
@@ -433,13 +441,14 @@ class DictationMachine:
                 )
             else:
                 text = await asyncio.to_thread(
-                    asr_transcribe, trimmed, self._settings.language
+                    asr_transcribe,
+                    trimmed,
+                    self._settings.language,
+                    model_kind=self._settings.model_kind,
                 )
         except RuntimeError as exc:
             dt = time.perf_counter() - t0
-            backend = (
-                "api" if self._settings.model_kind == MODEL_KIND_API else "local"
-            )
+            backend = self._settings.model_kind
             logger.warning(
                 "[asr] %s back-end failed after %.2fs: %s — typing nothing",
                 backend,
