@@ -1,10 +1,16 @@
 # dictate-mac 🎙️
 
-Voice dictation for macOS with **three ASR backends** selectable at runtime:
+Voice dictation for macOS with **five ASR backends** selectable at runtime:
 
 - **Local Whisper** — `mlx-community/whisper-large-v3-turbo` runs
   in-process via MLX on Apple Silicon (~1.6 GB RAM, works fully
   offline, 100 languages).
+- **Local Whisper Podlodka fp16 / q8** —
+  `evilfreelancer/whisper-podlodka-turbo-MLX`, a
+  whisper-large-v3-turbo fine-tune focused on Russian + English with
+  punctuation, running in-process via MLX at two quantizations
+  (~1.8 GB / ~1.1 GB RAM respectively). Same 100-language support as
+  stock Whisper; strongest on ru/en.
 - **Local GigaAM** — `ai-babai/gigaam-multilingual-mlx` (FP16), a
   multilingual CTC model running in-process via MLX (~1.4 GB RAM,
   fully offline, Russian / English / Kazakh / Kyrgyz / Uzbek
@@ -18,9 +24,9 @@ Recognized text is typed character-by-character into the focused
 window — including Citrix Workspace sessions that don't share the
 clipboard.
 
-- 100 ISO-639-1 languages + `Auto-detect` — applies to the Whisper
-  and API backends (GigaAM detects its five languages on its own, so
-  the language menu is disabled while it is active)
+- 100 ISO-639-1 languages + `Auto-detect` — applies to the Whisper,
+  Podlodka and API backends (GigaAM detects its five languages on its
+  own, so the language menu is disabled while it is active)
 - Settings (including API credentials) persist at
   `~/.config/dictate-mac/config.json` with mode `0o600`; the API key
   is never logged
@@ -38,7 +44,7 @@ clipboard.
 - [Usage](#usage)
 - [The menu bar](#the-menu-bar)
 - [Recognition language](#recognition-language)
-- [Choosing your backend: Whisper vs GigaAM vs API](#choosing-your-backend-whisper-vs-gigaam-vs-api)
+- [Choosing your backend: Whisper vs Podlodka vs GigaAM vs API](#choosing-your-backend-whisper-vs-podlodka-vs-gigaam-vs-api)
 - [The config file](#the-config-file)
 - [CLI subcommands](#cli-subcommands)
 - [How it works](#how-it-works)
@@ -55,10 +61,10 @@ To *run* dictate-mac:
 - **macOS 13 Ventura** or newer
 - **8 GB RAM** or more
 - Any working microphone (the built-in one is fine)
-- ~285 MB for the `.app` itself, plus an optional ~1.5 GB for the
-  Whisper weights **or** ~1.2 GB for the GigaAM weights (downloaded on
-  first launch of the matching local mode; **API** mode needs no extra
-  disk)
+- ~285 MB for the `.app` itself, plus an optional download for the
+  selected local backend's weights (~1.5 GB Whisper, ~1.5 GB Podlodka
+  fp16, ~0.8 GB Podlodka q8, or ~1.2 GB GigaAM; downloaded on first
+  launch of the matching local mode; **API** mode needs no extra disk)
 - Internet access only for the first local-model download — API mode
   needs none
 
@@ -78,7 +84,7 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.5.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.5.0-macos.zip)
+[`DictateMac-v0.6.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.6.0-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
 Compressed download is ~110–140 MB; the extracted `.app` is ~284 MB.
 
@@ -94,7 +100,7 @@ shasum -a 256 DictateMac-v0.5.0-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.5.0-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.6.0-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -120,7 +126,13 @@ fixes if any are still missing.
 The default is **Local Whisper** — the in-process Whisper model. You
 don't have to do anything; the app works offline out of the box.
 
-To use the GigaAM multilingual CTC model instead (strong for Russian,
+To use the Podlodka fine-tune instead (stronger Russian punctuation,
+ru/en focus), click the menu icon → **Model (changing will restart
+app)** → **Local Whisper Podlodka fp16** or **Local Whisper Podlodka
+q8**. The app restarts and downloads the variant's weights on first
+use. q8 uses about half the RAM of fp16 with near-identical quality.
+
+To use the GigaAM multilingual CTC model (strong for Russian,
 plus English / Kazakh / Kyrgyz / Uzbek), click the menu icon →
 **Model (changing will restart app)** → **Local GigaAM**. The app
 restarts and downloads the ~1.2 GB weights on first use.
@@ -240,6 +252,8 @@ Status: Ready — press Right Option to start and stop recording
 ─────────────────
 Model (changing will restart app)
 ✓ Local Whisper (mlx-community/whisper-large-v3-turbo)
+  Local Whisper Podlodka fp16 (evilfreelancer/whisper-podlodka-turbo-MLX)
+  Local Whisper Podlodka q8 (evilfreelancer/whisper-podlodka-turbo-MLX)
   Local GigaAM (ai-babai/gigaam-multilingual-mlx)
   API (https://<your-host>/v1)
 ─────────────────
@@ -261,6 +275,8 @@ Quit
 | `Status: <state>`          | Disabled, read-only. Updated every 0.5 s.            |
 | `Model (changing will restart app)` | Disabled, descriptive header.                        |
 | `Local Whisper (...)`      | Clickable. Switches to the local mlx-whisper backend and restarts the daemon. Persists to `~/.config/dictate-mac/config.json`. |
+| `Local Whisper Podlodka fp16 (...)` | Clickable. Switches to the Whisper-Podlodka-Turbo fine-tune (ru/en with punctuation) at full fp16 precision and restarts the daemon. |
+| `Local Whisper Podlodka q8 (...)` | Clickable. Same model at 8-bit quantization — about half the RAM of fp16 with near-identical quality. |
 | `Local GigaAM (...)`       | Clickable. Switches to the local GigaAM multilingual CTC backend and restarts the daemon. The Recognition-language menu is disabled while this backend is active (the model has no language parameter). |
 | `API (<endpoint>)`         | Clickable. Opens the API credentials dialog (Endpoint / API key / Model ID). On a successful OK the dialog GETs `<endpoint>/models` to verify the endpoint + model id, persists the values, switches the active backend to API, and restarts the daemon. |
 | `Recognition language: <X>`| Clickable. Opens a submenu of `Auto-detect` and the 100 ISO-639-1 languages Whisper supports. Selecting one persists the choice and applies to the next recording (no restart). |
@@ -276,11 +292,13 @@ Quit
 `<state>` reflects the live daemon state:
 
 - `Starting…` — process launched, running import-time setup.
-- `Downloading whisper model…` / `Downloading GigaAM model…` —
+- `Downloading whisper model…` / `Downloading Podlodka fp16 model…` /
+  `Downloading Podlodka q8 model…` / `Downloading GigaAM model…` —
   first-run HF download of the active local backend (skipped in
   API mode and on subsequent launches).
-- `Loading whisper into RAM…` / `Loading GigaAM into RAM…` — model
-  weights are being loaded (~30–60 s cold, ~2 s from cache).
+- `Loading whisper into RAM…` / `Loading Podlodka fp16 into RAM…` /
+  `Loading Podlodka q8 into RAM…` / `Loading GigaAM into RAM…` —
+  model weights are being loaded (~30–60 s cold, ~2 s from cache).
   Skipped in API mode.
 - `Ready` — Right Option is armed. silero-vad is NOT pre-loaded here
   — it warms up lazily on the first recording.
@@ -312,9 +330,9 @@ The submenu lists `Auto-detect` first, then the 100 ISO-639-1
 languages Whisper supports, sorted alphabetically by their English
 display name (`Russian`, `English`, `German`, …).
 
-## Choosing your backend: Whisper vs GigaAM vs API
+## Choosing your backend: Whisper vs Podlodka vs GigaAM vs API
 
-The three backends share the same audio pipeline (PortAudio →
+The backends share the same audio pipeline (PortAudio →
 silero-vad → trimmed buffer) — the only difference is what happens
 in the **Transcribing** step.
 
@@ -340,6 +358,32 @@ in the **Transcribing** step.
 - **Speed:** ~3 s per recording on M1.
 - **Restart on switch:** clicking another backend in the menu
   restarts the daemon (the new backend takes effect at boot).
+
+### Local Whisper Podlodka fp16 / q8
+
+- **What it is:** `evilfreelancer/whisper-podlodka-turbo-MLX` — an
+  MLX conversion of the Whisper-Podlodka-Turbo fine-tune
+  (`bond005/whisper-podlodka-turbo`, base: whisper-large-v3-turbo)
+  trained for Russian + English with punctuation and robustness.
+  Same architecture as stock Whisper, so all 100 languages still
+  work — just weaker outside ru/en than the stock model.
+- **What it does:** runs in-process via the same mlx-whisper path as
+  Local Whisper, including the decode options and per-language style
+  prompts. The weights revision is pinned in the source, so upstream
+  re-uploads can never silently change behaviour.
+- **Quantizations:** two menu rows map to the repo's subfolders:
+  **fp16** (~1.5 GB download, ~1.8 GB RAM) and **q8** (8-bit,
+  group size 64; ~0.8 GB download, ~1.1 GB RAM). q8 is near-lossless
+  for ASR quality and is the better default when RAM is tight;
+  fp16 keeps full fine-tune precision.
+- **Disk:** only the selected variant's subfolder is downloaded to
+  `~/.cache/huggingface/hub/`. Switching variants later downloads
+  the other one.
+- **Network:** none after the first download — works fully offline.
+- **Languages:** same menu as stock Whisper; strongest on Russian
+  (punctuated, capitalised output) and English.
+- **Restart on switch:** same as the other backends — a menu click
+  restarts the daemon.
 
 ### Local GigaAM
 
@@ -439,8 +483,8 @@ Schema v2 contents look like:
 - `_v` is the schema version (currently `2`).
 - `language` is either an ISO-639-1 code (`"ru"`, `"en"`, …) or the
   sentinel `"auto"`. Ignored while `model_kind` is `"gigaam"`.
-- `model_kind` is `"local"` (default, Whisper), `"gigaam"`, or
-  `"api"`.
+- `model_kind` is `"local"` (default, Whisper), `"podlodka_fp16"`,
+  `"podlodka_q8"`, `"gigaam"`, or `"api"`.
 - The remaining three fields are only meaningful with
   `model_kind=api`.
 
@@ -472,13 +516,14 @@ binary and the source venv:
 Common flags (before or after the subcommand): `--quiet`,
 `--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}`,
 `--output {quartz,osascript}`, `--language {auto|<iso-639-1>}`,
-`--model-kind {local,gigaam,api}`, `--api-endpoint <url>`,
-`--api-key <key>`, `--model-id <id>`. The last three are meaningful
-only with `--model-kind=api`; `daemon` refuses to start without the
-three required values when `api` is selected. `--language` is ignored
-with `--model-kind=gigaam` (the model auto-detects its five
-languages). CLI runs do not read or write the persisted config file —
-language and ASR settings are taken from flags directly.
+`--model-kind {local,podlodka_fp16,podlodka_q8,gigaam,api}`,
+`--api-endpoint <url>`, `--api-key <key>`, `--model-id <id>`. The
+last three are meaningful only with `--model-kind=api`; `daemon`
+refuses to start without the three required values when `api` is
+selected. `--language` is ignored with `--model-kind=gigaam` (the
+model auto-detects its five languages). CLI runs do not read or write
+the persisted config file — language and ASR settings are taken from
+flags directly.
 
 Examples:
 
@@ -488,6 +533,9 @@ dictate-mac daemon --language=ru
 
 # Local GigaAM backend (Russian auto-detected by the model):
 dictate-mac daemon --model-kind=gigaam
+
+# Podlodka fine-tune at 8-bit quantization, Russian:
+dictate-mac daemon --model-kind=podlodka_q8 --language=ru
 
 # Auto-detect for this CLI session (default):
 dictate-mac daemon
@@ -501,6 +549,9 @@ dictate-mac daemon \
 
 # Pre-download the GigaAM weights without starting the daemon:
 dictate-mac warmup --model-kind=gigaam --skip-mic-test
+
+# Pre-download the Podlodka q8 weights without starting the daemon:
+dictate-mac warmup --model-kind=podlodka_q8 --skip-mic-test
 ```
 
 When the bundled `.app` is the entry point, the same subcommands are
@@ -534,7 +585,8 @@ opens the log file in your default `.log` viewer (Console.app).
 │          ┌───────────────────┼─────────────────┐                 │
 │          ▼                   ▼                 ▼                 │
 │   mlx-whisper (local)  GigaAM CTC (local)  POST /v1/audio/      │
-│   ~1.6 GB RAM          ~1.4 GB RAM         transcriptions (api)  │
+│   stock or Podlodka    ~1.4 GB RAM         transcriptions (api)  │
+│   ~1.1–1.8 GB RAM                                                │
 │                                                                   │
 │                          │ text                                  │
 │                          ▼                                       │
@@ -553,7 +605,9 @@ primitives.
 The ASR backend is selected at startup from the config file's
 `model_kind` field. In **local** mode the daemon downloads the
 Whisper model (if not cached) and loads it into RAM before arming
-the hotkey; **gigaam** mode does the same with the GigaAM artifact.
+the hotkey; **podlodka_fp16** / **podlodka_q8** do the same with
+their variant subfolder of the Podlodka repo; **gigaam** mode does
+the same with the GigaAM artifact.
 Status reaches `Ready` only after that completes. In
 **API** mode the local-model load is skipped, `Status: Ready`
 arrives within a second, and audio is POSTed to the configured
@@ -574,17 +628,20 @@ dictate-mac selftest --no-mic   # skip the microphone roundtrip
 
 If you installed via the `.app` rather than from a venv, the same
 subcommands are reachable via the bundle's executable
-(`/Applications/DictateMac.app/Contents/MacOS/DictateMac selftest`).
-Exit code 0 if all 22 checks pass, 1 otherwise. Each check prints a
+(``/Applications/DictateMac.app/Contents/MacOS/DictateMac selftest``).
+Exit code 0 if all 28 checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail; the checks are
 `model-load`, `vad-silence`, `vad-speech-like`, `asr-smoke`,
 `gigaam-model-load`, `gigaam-asr-smoke`, `typer-dispatch`,
 `ssl-certifi`, `config-v1-migration`, `config-invalid-endpoint`,
 `config-api-required-when-api`, `config-gigaam-kind`,
+`config-podlodka-kinds`,
 `audio-wav-roundtrip`, `api-transcribe-headers`,
 `api-transcribe-auto-language`, `api-models-check`, `gigaam-dispatch`,
-`whisper-decode-options`, `gigaam-chunking`, `warmup-retry`,
-`recorder-portaudio-retry`, `hotkey-escape-event`,
+`whisper-decode-options`, `gigaam-chunking`, `podlodka-dispatch`,
+`warmup-retry`, `recorder-portaudio-retry`, `hotkey-escape-event`,
+`podlodka-fp16-model-load`, `podlodka-fp16-asr-smoke`,
+`podlodka-q8-model-load`, `podlodka-q8-asr-smoke`,
 plus an optional `mic-roundtrip`.
 
 **FAQ:**
@@ -598,7 +655,7 @@ plus an optional `mic-roundtrip`.
 | `Model download failed — press Right Option to retry` | The first-run download failed (no network, DNS/VPN hiccup, HF outage) | Bring the network up and press **Right Option** — the warmup re-runs without an app restart. Check the log via **Open log** if it keeps failing. |
 | `mlx` fails to install / load | Python 3.14 (no wheel) | Recreate venv: `uv venv --python 3.13 .venv --force && uv pip install -e .` |
 | API mode returns HTTP 429 | The OpenAI-compatible gateway is rate-limiting | Some gateways (e.g. `whisper-large-v3-turbo`) have a 1-request-per-10-15-seconds cap on certain upstream providers. Switch the menu to a different model id, or to Local if the same model is acceptable. |
-| Too much RAM usage | A local backend occupies ~1.4-1.6 GB permanently | API mode doesn't load any ASR weights; switch if RAM is tight. |
+| Too much RAM usage | A local backend occupies ~1.1–1.8 GB permanently | API mode doesn't load any ASR weights; Podlodka q8 is the lightest whisper-family option (~1.1 GB). Switch if RAM is tight. |
 
 ## Uninstall & known limitations
 
@@ -608,9 +665,10 @@ plus an optional `mic-roundtrip`.
 rm -rf ~/dictate-mac
 rm -rf /Applications/DictateMac.app      # only if you copied it there
 
-# 3. Remove logs and optional local model caches (~1.5 GB + ~1.2 GB)
+# 3. Remove logs and optional local model caches
 rm -rf ~/Library/Logs/dictate-mac
 rm -rf ~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo
+rm -rf ~/.cache/huggingface/hub/models--evilfreelancer--whisper-podlodka-turbo-MLX
 rm -rf ~/.cache/huggingface/hub/models--ai-babai--gigaam-multilingual-mlx
 ```
 
@@ -622,14 +680,18 @@ revoke `com.local.dictate-mac` in
 **Known limitations:**
 
 - RAM is held permanently after the first startup **when using a
-  local backend**: ~1.6 GB for Whisper, ~1.4 GB for GigaAM. The API
-  backend doesn't load any ASR weights into memory; its startup is
+  local backend**: ~1.8 GB for Whisper, ~1.8 GB for Podlodka fp16,
+  ~1.1 GB for Podlodka q8, ~1.4 GB for GigaAM. The API backend
+  doesn't load any ASR weights into memory; its startup is
   instantaneous and can run on Mac models where the mlx weights
   aren't downloaded.
 - GigaAM emits lowercase text without punctuation (greedy CTC
   decoding) and supports only Russian, English, Kazakh, Kyrgyz and
-  Uzbek — use Whisper or API for other languages or for
+  Uzbek — use Whisper, Podlodka or API for other languages or for
   punctuation-rich output.
+- The Podlodka fine-tune is strongest on Russian and English; on
+  other languages stock Whisper (or the API backend) remains the
+  better choice.
 - macOS TCC permissions (Microphone, Accessibility, Input Monitoring)
   must be granted manually. With the bundled `DictateMac.app` they
   go to `com.local.dictate-mac`; with the menu-bar app run from
@@ -646,8 +708,9 @@ revoke `com.local.dictate-mac` in
 - The hotkey tap stays disabled if Input Monitoring was not granted
   before launch. Grant it in System Settings → Privacy & Security →
   Input Monitoring, then Quit + reopen DictateMac.
-- Switching the ASR backend (**Local Whisper** ↔ **Local GigaAM** ↔
-  **API**) always triggers a restart. The menu click is automatic.
+- Switching the ASR backend (**Local Whisper** ↔ **Local Whisper
+  Podlodka** ↔ **Local GigaAM** ↔ **API**) always triggers a restart.
+  The menu click is automatic.
 - Python 3.13.x only; 3.14 is unsupported because `mlx` does not yet
   ship a wheel for it.
 - The bundled `.app` cannot transcode audio files

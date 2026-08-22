@@ -32,6 +32,8 @@ from dictate_mac.audio import SAMPLE_RATE, Recorder, trim_silence
 from dictate_mac.transcriber import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
+    MODEL_KIND_PODLODKA_FP16,
+    MODEL_KIND_PODLODKA_Q8,
     _audio_to_wav_bytes,
     _transcribe_api,
     check_api_model_available,
@@ -474,6 +476,63 @@ def test_config_gigaam_kind_valid() -> Result:
     )
 
 
+def test_config_podlodka_kinds_valid() -> Result:
+    """Both Podlodka kinds are first-class: valid without API fields
+    and preserved by a save/load roundtrip."""
+    from dictate_mac import config as config_mod
+    from dictate_mac.config import PersistedSettings
+
+    for kind in (
+        config_mod.MODEL_KIND_PODLODKA_FP16,
+        config_mod.MODEL_KIND_PODLODKA_Q8,
+    ):
+        if kind not in config_mod.MODEL_KINDS:
+            return Result(
+                "config-podlodka-kinds",
+                False,
+                f"{kind!r} missing from MODEL_KINDS",
+            )
+        s = PersistedSettings(model_kind=kind, language="ru")
+        if not s.is_valid():
+            return Result(
+                "config-podlodka-kinds",
+                False,
+                f"{kind!r} with empty API fields should be valid",
+            )
+
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "config.json"
+        original = config_mod.config_path
+        try:
+            config_mod.config_path = lambda: target
+            config_mod.save(
+                PersistedSettings(
+                    model_kind=config_mod.MODEL_KIND_PODLODKA_Q8,
+                    language="ru",
+                )
+            )
+            loaded = config_mod.load()
+        finally:
+            config_mod.config_path = original
+        if loaded.model_kind != config_mod.MODEL_KIND_PODLODKA_Q8:
+            return Result(
+                "config-podlodka-kinds",
+                False,
+                f"roundtrip lost model_kind: {loaded.model_kind!r}",
+            )
+        if loaded.language != "ru":
+            return Result(
+                "config-podlodka-kinds",
+                False,
+                f"roundtrip lost language: {loaded.language!r}",
+            )
+    return Result(
+        "config-podlodka-kinds",
+        True,
+        "podlodka_fp16/podlodka_q8 valid without API fields; roundtrip preserves them",
+    )
+
+
 def test_audio_to_wav_bytes_round_trip() -> Result:
     """numpy -> int16 WAV bytes -> numpy: amplitude preserved within
     one quantization step."""
@@ -795,8 +854,11 @@ def test_gigaam_dispatch() -> Result:
         calls["gigaam"] = audio.size
         return "gigaam-text"
 
-    def fake_local(audio: np.ndarray, language: str) -> str:
+    def fake_local(
+        audio: np.ndarray, language: str, model_kind: str = "local"
+    ) -> str:
         calls["local"] = language
+        calls["local_kind"] = model_kind
         return "local-text"
 
     real_gigaam, real_local = t._transcribe_gigaam, t._transcribe_local
@@ -985,6 +1047,125 @@ def test_gigaam_chunking() -> Result:
         True,
         "45 s → 3 windows [20 s + 2 s overlap]; midpoint stitch dedupes "
         "overlap words; 5 s stays one-shot",
+    )
+
+
+def test_podlodka_dispatch() -> Result:
+    """transcribe(model_kind='podlodka_fp16'/'podlodka_q8') routes to the
+    local whisper path with the kind forwarded for weight selection."""
+    import dictate_mac.transcriber as t
+
+    calls: dict = {}
+
+    def fake_local(
+        audio: np.ndarray, language: str, model_kind: str = "local"
+    ) -> str:
+        calls["kind"] = model_kind
+        calls["language"] = language
+        return "podlodka-text"
+
+    real_local = t._transcribe_local
+    try:
+        t._transcribe_local = fake_local
+        audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.5)
+        out = t.transcribe(
+            audio, language="ru", model_kind=t.MODEL_KIND_PODLODKA_FP16
+        )
+        if out != "podlodka-text" or calls.get("kind") != t.MODEL_KIND_PODLODKA_FP16:
+            return Result(
+                "podlodka-dispatch",
+                False,
+                f"fp16 routing wrong: out={out!r} calls={calls}",
+            )
+        out = t.transcribe(
+            audio, language="en", model_kind=t.MODEL_KIND_PODLODKA_Q8
+        )
+        if out != "podlodka-text" or calls.get("kind") != t.MODEL_KIND_PODLODKA_Q8:
+            return Result(
+                "podlodka-dispatch",
+                False,
+                f"q8 routing wrong: out={out!r} calls={calls}",
+            )
+    finally:
+        t._transcribe_local = real_local
+
+    return Result(
+        "podlodka-dispatch",
+        True,
+        "both podlodka kinds route to the local whisper path with kind forwarded",
+    )
+
+
+def test_podlodka_fp16_model_load() -> Result:
+    """Podlodka fp16 weights download (first run) and load into RAM.
+
+    Loading a second whisper-family model releases whichever one
+    occupied the slot before it, so at most one whisper copy is
+    resident alongside GigaAM.
+    """
+    t0 = time.perf_counter()
+    warm(MODEL_KIND_PODLODKA_FP16)
+    dt = time.perf_counter() - t0
+    if not model_loaded():
+        return Result(
+            "podlodka-fp16-model-load",
+            False,
+            "podlodka fp16 not loaded after warm()",
+        )
+    return Result("podlodka-fp16-model-load", True, f"loaded in {dt:.2f}s")
+
+
+def test_podlodka_fp16_asr_smoke() -> Result:
+    audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.8)
+    t0 = time.perf_counter()
+    text = transcribe(audio, model_kind=MODEL_KIND_PODLODKA_FP16)
+    dt = time.perf_counter() - t0
+    if not isinstance(text, str):
+        return Result(
+            "podlodka-fp16-asr-smoke",
+            False,
+            f"expected str, got {type(text).__name__}",
+        )
+    return Result(
+        "podlodka-fp16-asr-smoke",
+        True,
+        f"podlodka fp16 transcribe returned a {len(text)}-char string in "
+        f"{dt:.2f}s "
+        "(content is not asserted — synthetic signal is not real speech)",
+    )
+
+
+def test_podlodka_q8_model_load() -> Result:
+    """Podlodka q8 weights download (first run) and load into RAM."""
+    t0 = time.perf_counter()
+    warm(MODEL_KIND_PODLODKA_Q8)
+    dt = time.perf_counter() - t0
+    if not model_loaded():
+        return Result(
+            "podlodka-q8-model-load",
+            False,
+            "podlodka q8 not loaded after warm()",
+        )
+    return Result("podlodka-q8-model-load", True, f"loaded in {dt:.2f}s")
+
+
+def test_podlodka_q8_asr_smoke() -> Result:
+    audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.8)
+    t0 = time.perf_counter()
+    text = transcribe(audio, model_kind=MODEL_KIND_PODLODKA_Q8)
+    dt = time.perf_counter() - t0
+    if not isinstance(text, str):
+        return Result(
+            "podlodka-q8-asr-smoke",
+            False,
+            f"expected str, got {type(text).__name__}",
+        )
+    return Result(
+        "podlodka-q8-asr-smoke",
+        True,
+        f"podlodka q8 transcribe returned a {len(text)}-char string in "
+        f"{dt:.2f}s "
+        "(content is not asserted — synthetic signal is not real speech)",
     )
 
 
@@ -1225,6 +1406,7 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_config_invalid_endpoint_rejected,
         test_config_missing_api_fields_when_kind_local,
         test_config_gigaam_kind_valid,
+        test_config_podlodka_kinds_valid,
         test_audio_to_wav_bytes_round_trip,
         test_api_transcribe_sends_model_id_and_bearer,
         test_api_transcribe_omits_language_when_auto,
@@ -1232,9 +1414,17 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_gigaam_dispatch,
         test_whisper_decode_options,
         test_gigaam_chunking,
+        test_podlodka_dispatch,
         test_warmup_failure_retryable,
         test_recorder_portaudio_retry,
         test_hotkey_escape_event,
+        # Podlodka variants — real download + load + inference. Each
+        # whisper-family load releases the previous one, so at most one
+        # multi-GB whisper copy is resident alongside GigaAM.
+        test_podlodka_fp16_model_load,
+        test_podlodka_fp16_asr_smoke,
+        test_podlodka_q8_model_load,
+        test_podlodka_q8_asr_smoke,
     ]
     if with_mic:
         tests.append(lambda: test_mic_roundtrip(language=language))

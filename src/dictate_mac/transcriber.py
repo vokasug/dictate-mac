@@ -9,6 +9,14 @@ Three paths produce text from a mono 16 kHz float32 buffer:
   resident in RAM for the lifetime of the process. The MLX Metal
   buffer cache is returned to the OS (``mx.clear_cache``) after each
   transcription, so the footprint does not grow across dictations.
+  The same code path also serves the two Whisper-Podlodka-Turbo
+  variants (``evilfreelancer/whisper-podlodka-turbo-MLX``, fp16 and
+  q8): identical architecture to large-v3-turbo, fine-tuned for
+  Russian + English with punctuation. Each variant downloads only its
+  own repo subfolder and loads through the same ``ModelHolder``
+  machinery — quantized variants are natively supported by
+  mlx-whisper via the ``quantization`` key in the variant's
+  ``config.json``.
 * ``_transcribe_gigaam`` runs the GigaAM multilingual CTC model
   (``gigaam-multilingual-mlx`` package, FP16 artifact) in-process.
   Same lifecycle as the whisper path: one instance pinned to the
@@ -45,6 +53,7 @@ import threading
 import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
@@ -55,6 +64,8 @@ from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
     MODEL_KIND_LOCAL,
+    MODEL_KIND_PODLODKA_FP16,
+    MODEL_KIND_PODLODKA_Q8,
     endpoint_scheme_ok,
     normalize_endpoint,
 )
@@ -105,6 +116,22 @@ _repair_ssl_cert_env()
 
 MODEL_REPO = "mlx-community/whisper-large-v3-turbo"
 TASK = "transcribe"
+
+# Whisper-Podlodka-Turbo — evilfreelancer's MLX conversion of
+# bond005/whisper-podlodka-turbo (a whisper-large-v3-turbo fine-tune
+# focused on Russian + English with punctuation and robustness). The
+# repo ships one subfolder per quantization; each holds config.json +
+# weights.safetensors in the exact layout mlx-whisper's
+# ``load_models.load_model`` expects (quantized variants carry a
+# "quantization" key that loader applies via nn.quantize). The
+# revision is pinned so upstream re-uploads can never silently change
+# the weights; only the selected variant's subfolder is downloaded.
+PODLODKA_REPO = "evilfreelancer/whisper-podlodka-turbo-MLX"
+PODLODKA_REVISION = "5245d60b52d4ae73d84b504920aa4fd8fae20ecd"
+PODLODKA_VARIANTS: dict[str, str] = {
+    MODEL_KIND_PODLODKA_FP16: "fp16",
+    MODEL_KIND_PODLODKA_Q8: "q8",
+}
 
 # Per-language style prompts for the whisper path, keyed by ISO-639-1
 # code (top 30 languages by number of speakers). Whisper is
@@ -171,9 +198,11 @@ WarmCallback = Callable[[WarmPhase, str], None]
 
 
 _model = None
+_model_kind_loaded: Optional[str] = None
 _model_lock = threading.Lock()
 _first_call_done = False
 _local_path_cache: Optional[str] = None
+_podlodka_path_cache: dict[str, str] = {}
 
 _gigaam_model = None
 _gigaam_lock = threading.Lock()
@@ -219,12 +248,15 @@ def _do_warmup_blocking() -> None:
             _emit("loading", "")
             _run_on_mlx_thread(_load_gigaam)
         else:
-            if not is_model_cached():
-                _emit("downloading", MODEL_REPO)
-                logger.info("downloading %s …", MODEL_REPO)
-                _local_model_path()
+            if not is_model_cached(kind):
+                repo_label = (
+                    PODLODKA_REPO if kind in PODLODKA_VARIANTS else MODEL_REPO
+                )
+                _emit("downloading", repo_label)
+                logger.info("downloading %s …", repo_label)
+                _local_model_path(kind)
             _emit("loading", "")
-            _run_on_mlx_thread(_load_model)
+            _run_on_mlx_thread(_load_model, kind)
         _emit("ready", "")
     except Exception as exc:  # noqa: BLE001
         logger.exception("background warmup failed; the next transcribe() will retry")
@@ -257,8 +289,52 @@ def ensure_warm_async(
     return _warmup_thread
 
 
-def _local_model_path() -> str:
+def _podlodka_allow_patterns(variant: str) -> list[str]:
+    return [f"{variant}/config.json", f"{variant}/weights.safetensors"]
+
+
+def _podlodka_model_path(model_kind: str) -> str:
+    """Local snapshot path of the variant dir for a Podlodka kind.
+
+    Downloads the variant's two files on first use (resumable), then
+    returns ``<snapshot>/<variant>`` — the directory layout mlx-whisper
+    expects. Only the selected quantization is fetched; the other
+    variant and the repo's test WAVs stay untouched.
+    """
+    cached = _podlodka_path_cache.get(model_kind)
+    if cached and Path(cached).is_dir():
+        return cached
+
+    from huggingface_hub import snapshot_download
+
+    variant = PODLODKA_VARIANTS[model_kind]
+    patterns = _podlodka_allow_patterns(variant)
+    try:
+        root = snapshot_download(
+            repo_id=PODLODKA_REPO,
+            revision=PODLODKA_REVISION,
+            local_files_only=True,
+            allow_patterns=patterns,
+        )
+        if not (Path(root) / variant / "weights.safetensors").is_file():
+            raise FileNotFoundError(variant)
+    except Exception:  # noqa: BLE001 — not cached yet, download for real
+        logger.info("downloading %s (%s) …", PODLODKA_REPO, variant)
+        root = snapshot_download(
+            repo_id=PODLODKA_REPO,
+            revision=PODLODKA_REVISION,
+            allow_patterns=patterns,
+        )
+    path = str(Path(root) / variant)
+    _podlodka_path_cache[model_kind] = path
+    return path
+
+
+def _local_model_path(model_kind: str = MODEL_KIND_LOCAL) -> str:
     global _local_path_cache
+    if model_kind in PODLODKA_VARIANTS:
+        return _podlodka_model_path(model_kind)
+
     if _local_path_cache is not None:
         return _local_path_cache
 
@@ -277,6 +353,8 @@ def is_model_cached(model_kind: str = MODEL_KIND_LOCAL) -> bool:
     """True if the given local model is already in the HF cache."""
     if model_kind == MODEL_KIND_GIGAAM:
         return _gigaam_model_cached()
+    if model_kind in PODLODKA_VARIANTS:
+        return _podlodka_model_cached(model_kind)
     from huggingface_hub import snapshot_download
 
     try:
@@ -284,6 +362,30 @@ def is_model_cached(model_kind: str = MODEL_KIND_LOCAL) -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def _podlodka_model_cached(model_kind: str) -> bool:
+    """True when both files of the kind's variant are already local.
+
+    ``snapshot_download(local_files_only=True)`` resolves against any
+    locally-present snapshot of the repo even when this particular
+    variant was never fetched (all quantizations share one cache
+    entry), so the check verifies the actual files on disk.
+    """
+    from huggingface_hub import snapshot_download
+
+    variant = PODLODKA_VARIANTS[model_kind]
+    try:
+        root = snapshot_download(
+            repo_id=PODLODKA_REPO,
+            revision=PODLODKA_REVISION,
+            local_files_only=True,
+            allow_patterns=_podlodka_allow_patterns(variant),
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    d = Path(root) / variant
+    return (d / "config.json").is_file() and (d / "weights.safetensors").is_file()
 
 
 def _gigaam_repo_revision() -> tuple[str, str]:
@@ -327,24 +429,67 @@ def _download_gigaam() -> None:
     )
 
 
-def _load_model():
-    global _model
-    if _model is not None:
+def _release_whisper_slot() -> None:
+    """Drop the cached whisper-family model and every live reference.
+
+    The app runs exactly one whisper-family backend per process
+    (switching restarts), but the selftest loads several back to back.
+    mlx-whisper's ``ModelHolder`` keeps its own class-level reference,
+    so without clearing it here two multi-GB copies would sit in RAM
+    at once.
+    """
+    global _model, _model_kind_loaded
+    try:
+        from mlx_whisper.transcribe import ModelHolder
+
+        ModelHolder.model = None
+        ModelHolder.model_path = None
+    except Exception:  # noqa: BLE001 — mlx_whisper not importable yet
+        pass
+    _model = None
+    _model_kind_loaded = None
+    try:
+        import mlx.core as mx
+
+        mx.clear_cache()
+        import gc
+
+        gc.collect()
+    except Exception:  # noqa: BLE001 — best-effort cleanup
+        pass
+
+
+def _load_model(model_kind: str = MODEL_KIND_LOCAL):
+    global _model, _model_kind_loaded
+    if _model is not None and _model_kind_loaded == model_kind:
         return _model
     with _model_lock:
-        if _model is not None:
+        if _model is not None and _model_kind_loaded == model_kind:
             return _model
+        if _model is not None:
+            logger.info(
+                "releasing previously loaded whisper model before loading %s",
+                model_kind,
+            )
+            _release_whisper_slot()
         t0 = time.perf_counter()
         import mlx.core as mx
         from mlx_whisper.transcribe import ModelHolder
 
-        local_path = _local_model_path()
-        logger.info("loading mlx-whisper model %s …", MODEL_REPO)
+        local_path = _local_model_path(model_kind)
+        logger.info(
+            "loading mlx-whisper model %s …",
+            PODLODKA_REPO if model_kind in PODLODKA_VARIANTS else MODEL_REPO,
+        )
         # Route the warmup through mlx-whisper's own ModelHolder so the
         # instance warmed here is the same object mlx_whisper.transcribe()
         # reuses later. A private load_model() copy would double the
-        # weight footprint (~1.6 GB x 2).
+        # weight footprint (~1.6 GB x 2). Quantized Podlodka variants go
+        # through the same call: the loader reads the "quantization" key
+        # from the variant's config.json and applies nn.quantize, so the
+        # fp16 dtype argument only shapes the un-quantized layers.
         _model = ModelHolder.get_model(local_path, mx.float16)
+        _model_kind_loaded = model_kind
         dt = time.perf_counter() - t0
         logger.info("model loaded in %.1fs (will stay in RAM)", dt)
         return _model
@@ -410,7 +555,7 @@ def warm(model_kind: str = MODEL_KIND_LOCAL) -> None:
     if model_kind == MODEL_KIND_GIGAAM:
         _run_on_mlx_thread(_load_gigaam)
         return
-    _run_on_mlx_thread(_load_model)
+    _run_on_mlx_thread(_load_model, model_kind)
 
 
 def model_loaded() -> bool:
@@ -609,23 +754,35 @@ def _transcribe_api(
     return text
 
 
-def _transcribe_local(audio: np.ndarray, language: str) -> str:
-    """Run the in-process mlx-whisper model (pinned to the MLX thread)."""
+def _transcribe_local(
+    audio: np.ndarray,
+    language: str,
+    model_kind: str = MODEL_KIND_LOCAL,
+) -> str:
+    """Run the in-process mlx-whisper model (pinned to the MLX thread).
+
+    ``model_kind`` selects the weights: the stock large-v3-turbo or one
+    of the Podlodka variants. All share the same decode pipeline.
+    """
     if audio is None or audio.size == 0:
         return ""
-    return _run_on_mlx_thread(_transcribe_local_mlx, audio, language)
+    return _run_on_mlx_thread(_transcribe_local_mlx, audio, language, model_kind)
 
 
-def _transcribe_local_mlx(audio: np.ndarray, language: str) -> str:
+def _transcribe_local_mlx(
+    audio: np.ndarray,
+    language: str,
+    model_kind: str = MODEL_KIND_LOCAL,
+) -> str:
     from dictate_mac.config import AUTO as CONFIG_AUTO
 
     global _first_call_done
-    _load_model()
+    _load_model(model_kind)
 
     import mlx.core as mx
     import mlx_whisper
 
-    local_path = _local_model_path()
+    local_path = _local_model_path(model_kind)
 
     whisper_lang: Optional[str] = None if language == CONFIG_AUTO else language
 
@@ -807,9 +964,12 @@ def transcribe(
     """Run ASR on a mono 16 kHz float32 buffer; return plain text.
 
     Dispatches to :func:`_transcribe_local`, :func:`_transcribe_gigaam`
-    or :func:`_transcribe_api` based on ``model_kind``. Callers passing
-    only ``(audio, language=)`` keep the historical behaviour. The
-    GigaAM path is a fixed multilingual CTC and ignores ``language``.
+    or :func:`_transcribe_api` based on ``model_kind``. Both the stock
+    whisper repo and the Podlodka variants route through
+    :func:`_transcribe_local`, which selects the weights directory by
+    kind. Callers passing only ``(audio, language=)`` keep the
+    historical behaviour. The GigaAM path is a fixed multilingual CTC
+    and ignores ``language``.
 
     On any failure in the API path a :class:`RuntimeError` is raised
     with a categorised message. The local paths keep their legacy
@@ -826,4 +986,4 @@ def transcribe(
         )
     if model_kind == MODEL_KIND_GIGAAM:
         return _transcribe_gigaam(audio)
-    return _transcribe_local(audio, language)
+    return _transcribe_local(audio, language, model_kind)

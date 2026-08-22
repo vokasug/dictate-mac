@@ -57,7 +57,7 @@ catches the leak at commit time rather than after a public release.
 
 ## 1. What this project is
 
-`dictate-mac` is a macOS-only voice dictation daemon with three ASR
+`dictate-mac` is a macOS-only voice dictation daemon with five ASR
 backends selected at runtime:
 
 - The user presses **Right Option** to start recording and presses it
@@ -68,6 +68,17 @@ backends selected at runtime:
   transcribed with one of:
   - **Local Whisper** — `mlx-whisper` (`mlx-community/whisper-large-v3-turbo`)
     running in-process. ~1.6 GB resident in RAM.
+  - **Local Whisper Podlodka fp16 / q8** —
+    `evilfreelancer/whisper-podlodka-turbo-MLX` (pinned revision),
+    an MLX conversion of the Whisper-Podlodka-Turbo fine-tune
+    (`bond005/whisper-podlodka-turbo`, base whisper-large-v3-turbo)
+    focused on Russian + English with punctuation. Two menu rows map
+    to the repo's `fp16/` (~1.5 GB download, ~1.8 GB RAM) and `q8/`
+    (8-bit, group size 64; ~0.8 GB download, ~1.1 GB RAM) subfolders;
+    only the selected variant's files are downloaded. Runs through the
+    same mlx-whisper path as stock Whisper (quantized variants are
+    natively supported via the `quantization` key in each variant's
+    `config.json`). All 100 languages work, strongest on ru/en.
   - **Local GigaAM** — `gigaam-multilingual-mlx`
     (`ai-babai/gigaam-multilingual-mlx`, FP16 artifact), a multilingual
     CTC Conformer running in-process via MLX. ~1.4 GB resident in RAM.
@@ -86,7 +97,7 @@ backends selected at runtime:
 The default entry point is `dictate-mac` (no subcommand) — a `rumps`
 menu bar app. `dictate-mac daemon` is a CLI-only mode for SSH/CI/tmux.
 
-Switching between the three ASR backends is a **restart-required**
+Switching between the ASR backends is a **restart-required**
 operation: each local model is loaded once at startup and held in RAM,
 so flipping backends mid-session would either keep the old model
 wasted in RAM (local → API) or block on a fresh ~30-60 s
@@ -117,7 +128,7 @@ dictate-mac/
 │       │   └── timing.py   # raises — we never call add_word_timestamps
 │       └── torchaudio/     # Python stub used by the silero-vad path
 ├── src/dictate_mac/
-│   ├── __init__.py         # __version__ (currently 0.4.2)
+│   ├── __init__.py         # __version__ (currently 0.6.0)
 │   ├── __main__.py         # python -m dictate_mac
 │   ├── cli.py              # argparse + daemon / warmup / selftest / menubar
 │   ├── audio.py            # Recorder + silero-vad trim_silence
@@ -145,7 +156,7 @@ reach across module boundaries — use the public surface listed.
 | ------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------- |
 | `cli.py`                  | argparse, subcommand dispatch, app-bundle detection           | `main`, `cmd_daemon`, `cmd_warmup`, `cmd_selftest`, `cmd_menubar`      |
 | `audio.py`                | mic capture + VAD trimming                                    | `Recorder`, `AudioConfig`, `trim_silence`, `has_speech`                |
-| `transcriber.py`          | ASR backends: local mlx-whisper + GigaAM CTC + OpenAI-compatible API | `transcribe(audio, language, *, model_kind, api_*)`, `check_api_model_available`, `ensure_warm_async`, `warm`, `is_model_cached`, `model_loaded`, `gigaam_loaded`, `_audio_to_wav_bytes` |
+| `transcriber.py`          | ASR backends: local mlx-whisper (stock + Podlodka fp16/q8) + GigaAM CTC + OpenAI-compatible API | `transcribe(audio, language, *, model_kind, api_*)`, `check_api_model_available`, `ensure_warm_async`, `warm`, `is_model_cached`, `model_loaded`, `gigaam_loaded`, `MODEL_REPO`, `PODLODKA_REPO`, `PODLODKA_REVISION`, `PODLODKA_VARIANTS`, `_audio_to_wav_bytes` |
 | `typer.py`                | keystroke injection into focused window                       | `type_text(text, backend, per_char_delay_ms)`, `type_text_quartz`, `type_text_osascript` |
 | `hotkey.py`               | global Right Option watcher (+ Esc cancel)                    | `HotkeyWatcher(output_queue)`, `HotkeyEdge`, `HotkeyEvent`              |
 | `state.py`                | orchestrates the loop: warm → arm → record → transcribe → type | `DictationMachine`, `Settings`, `State`, `SOUND_START`, `SOUND_END`     |
@@ -293,6 +304,45 @@ the reason is still valid after you check the source.
   occasionally be emitted by both windows (rare duplicated word).
   Shorter buffers stay one-shot, so normal dictation latency is
   unchanged.
+- **Whisper-Podlodka-Turbo ships as two selectable quantizations,
+  both through the stock whisper code path.** The HF repo
+  `evilfreelancer/whisper-podlodka-turbo-MLX` holds one subfolder per
+  quantization (`fp16/`, `q8/`, `q4/`); each is a complete
+  mlx-whisper model directory. `PODLODKA_VARIANTS` maps the kinds
+  `podlodka_fp16` / `podlodka_q8` to their subfolders; `q4` exists in
+  the repo but is deliberately not exposed (4-bit risks eroding
+  exactly what the fine-tune adds — Russian punctuation and
+  capitalisation). Design points:
+  - The revision is pinned (`PODLODKA_REVISION`) so upstream
+    re-uploads can never silently change the weights, mirroring how
+    GigaAM pins its artifact revision.
+  - Downloads use `snapshot_download(allow_patterns=["<variant>/
+    config.json", "<variant>/weights.safetensors"])`, so only the
+    selected variant lands in the HF cache — never the other
+    quantization or the repo's test WAVs.
+  - The cache check cannot rely on
+    `snapshot_download(local_files_only=True)` alone: it resolves
+    against any locally-present snapshot of the *repo*, even when
+    this particular variant was never fetched (all variants share
+    one cache entry). `_podlodka_model_cached` therefore verifies
+    both files exist under `<snapshot>/<variant>/`, and
+    `_podlodka_model_path` falls back to a real download pass when
+    `weights.safetensors` is missing.
+  - Quantized variants need no loader changes: mlx-whisper's own
+    `load_models.load_model` pops the `quantization` key from each
+    variant's `config.json` and calls `nn.quantize` before loading
+    weights, so `ModelHolder.get_model(path, mx.float16)` serves
+    fp16 and q8 alike — the dtype argument only shapes the
+    un-quantized layers.
+  - Transcription is the stock `_transcribe_local_mlx` with a
+    `model_kind` parameter: same decode options, same
+    `WHISPER_INITIAL_PROMPTS`, same `mx.clear_cache()` discipline.
+  - `_load_model` tracks `_model_kind_loaded` and releases the
+    previous whisper-family model before swapping kinds (including
+    mlx-whisper's `ModelHolder` class-level reference — otherwise
+    two multi-GB copies sit in RAM). Irrelevant in normal operation
+    (a backend switch restarts the process), but the selftest loads
+    several whisper-family models back to back in one process.
 - **The bundle process can start with an ASCII locale, breaking the
   GigaAM artifact load.** The py2app launcher environment may leave
   the process on a POSIX/C locale, so `Path.read_text()` defaults to
@@ -336,7 +386,8 @@ the reason is still valid after you check the source.
   show/hide eye button toggles visibility and re-copies `_key_value`
   into the now-visible field.
 - **Model switching requires an app restart.** Selecting a different
-  row in the Model menu (Local Whisper / Local GigaAM / API) writes
+  row in the Model menu (Local Whisper / Local Whisper Podlodka
+  fp16 / Local Whisper Podlodka q8 / Local GigaAM / API) writes
   the new `model_kind` to the config file and immediately calls
   `MenubarApp._restart_app` — the same `osascript` helper the
   **Restart** menu item uses. The user is dropped back into the
@@ -550,6 +601,18 @@ from a zip anyway, and nothing at runtime imports it). The
 `gigaam-multilingual-mlx` model weights are never bundled; they
 download to the standard HF cache on first launch of gigaam mode.
 
+**Every build is smoke-tested through the bundle binary before it is
+handed to a user or uploaded anywhere.** Run
+
+```bash
+dist/DictateMac.app/Contents/MacOS/DictateMac selftest --no-mic
+```
+
+and require an all-PASS report. The packaged runtime is not the venv:
+certifi must resolve inside the bundle, the stubs and zip-extracted
+native libs must import, and `__boot__.py` must boot — a green
+source-venv selftest proves none of that.
+
 ## 7. Dependencies (`pyproject.toml`)
 
 Python 3.13.x on Apple Silicon.
@@ -584,7 +647,8 @@ is never imported at runtime and is excluded from the bundle.)
 Common flags (must come before OR after the subcommand): `--quiet`,
 `--log-level` (DEBUG|INFO|WARNING|ERROR|CRITICAL), `--output`
 (quartz|osascript), `--language` (ISO-639-1 code or `auto`),
-`--model-kind` (`local`, `gigaam` or `api`), `--api-endpoint`,
+`--model-kind` (`local`, `podlodka_fp16`, `podlodka_q8`, `gigaam` or
+`api`), `--api-endpoint`,
 `--api-key`,
 `--model-id`. The last three are meaningful only with
 `--model-kind=api`; `cmd_daemon` refuses to start without the
@@ -608,7 +672,7 @@ Schema v2 contents:
 {
   "_v": 2,
   "language": "<iso-639-1 or 'auto'>",
-  "model_kind": "local|gigaam|api",
+  "model_kind": "local|podlodka_fp16|podlodka_q8|gigaam|api",
   "api_endpoint": "<openai-compatible base url>",
   "api_key": "<bearer token>",
   "api_model_id": "<model id the gateway should use>"
@@ -631,8 +695,8 @@ no supported match maps to `"auto"`.
 
 ## 10. Testing
 
-`dictate-mac selftest [--no-mic]` runs twenty-two checks; optionally a
-twenty-third mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
+`dictate-mac selftest [--no-mic]` runs twenty-eight checks; optionally a
+twenty-ninth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 
 1. **model-load** — `mlx_whisper` weights load into RAM.
 2. **vad-silence** — 1 s of zeros → VAD returns `[]`.
@@ -659,37 +723,51 @@ twenty-third mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
     empty API fields; `model_kind="api"` rejects partial ones.
 12. **config-gigaam-kind** — `model_kind="gigaam"` is valid without
     API fields and survives a save/load roundtrip.
-13. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
+13. **config-podlodka-kinds** — both Podlodka kinds
+    (`podlodka_fp16`/`podlodka_q8`) are valid without API fields and
+    survive a save/load roundtrip.
+14. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
     amplitude preserved to within one LSB.
-14. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
+15. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
     confirms the URL, multipart `model` field, `Authorization:
     Bearer` header and (when configured) `language` field are all
     wired correctly.
-15. **api-transcribe-auto-language** — when `language="auto"`, the
+16. **api-transcribe-auto-language** — when `language="auto"`, the
     `language` field is omitted from the form so the gateway falls
     back to its own detection.
-16. **api-models-check** — mocked `GET /v1/models` handles 200+id,
+17. **api-models-check** — mocked `GET /v1/models` handles 200+id,
     200-missing-id, 401, 404 and 500 correctly, and never leaks the
     fake API key string into any error.
-17. **gigaam-dispatch** — `transcribe(model_kind="gigaam")` routes to
+18. **gigaam-dispatch** — `transcribe(model_kind="gigaam")` routes to
     the GigaAM path (mocked) and the default still routes to whisper.
-18. **whisper-decode-options** — the whisper call always passes
+19. **whisper-decode-options** — the whisper call always passes
     `condition_on_previous_text=True`, `temperature=(0.0, 0.2, 0.4)`
     and `best_of=3`; it sends a style `initial_prompt` for the 30
     mapped languages (`ru`/`en`/`zh`/`de` checked) and none for
     `auto` or unmapped languages.
-19. **gigaam-chunking** — a 45 s buffer is decoded as three 20 s /
+20. **gigaam-chunking** — a 45 s buffer is decoded as three 20 s /
     2 s-overlap windows (mocked model), midpoint stitching dedupes
     overlap words, and a 5 s buffer stays one-shot.
-20. **warmup-retry** — a simulated warmup failure publishes a
+21. **podlodka-dispatch** — `transcribe(model_kind="podlodka_fp16"/
+    "podlodka_q8")` routes to the local whisper path (mocked) with
+    the kind forwarded for weight selection.
+22. **warmup-retry** — a simulated warmup failure publishes a
     retryable ERROR with the hotkey watcher still armed; a synthetic
     Right Option press re-runs the warmup into READY.
-21. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
+23. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
     open raising `PortAudioError -9986` triggers one
     `sd._terminate()`/`sd._initialize()` cycle and a successful retry.
-22. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
+24. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
     cancel press; Cmd+Esc is filtered out.
-23. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
+25. **podlodka-fp16-model-load** — Podlodka fp16 weights download
+    (first run) and load into RAM via `warm(MODEL_KIND_PODLODKA_FP16)`;
+    any previously loaded whisper-family model is released first.
+26. **podlodka-fp16-asr-smoke** — `transcribe(model_kind=
+    "podlodka_fp16")` returns a string of any length on synthetic
+    audio.
+27. **podlodka-q8-model-load** — same as 25 for the q8 quantization.
+28. **podlodka-q8-asr-smoke** — same as 26 for the q8 quantization.
+29. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
     report durations.
 
 `dictate-mac warmup --skip-mic-test` is the deterministic "is it
@@ -710,6 +788,9 @@ would block forever in a headless context).
 
 - Never `git commit` without an explicit user request.
 - Never delete files without an explicit user confirmation.
+- After every `.app` build, smoke-test the bundle binary
+  (`dist/DictateMac.app/Contents/MacOS/DictateMac selftest --no-mic`)
+  and require all-PASS before handing it to a user (see § 6).
 - Don't reach for `pynput` — use raw Quartz `CGEvent`.
 - Don't use the clipboard — Citrix blocks it.
 - Don't add a `README.md` "What changed" or "Changelog" section.
@@ -735,15 +816,19 @@ would block forever in a headless context).
 - RAM held permanently after first warmup **in a local mode**:
   ~1.6 GB for Whisper (steady-state footprint ~1.8-2.0 GB; transient
   decode buffers peak briefly during recognition and are returned to
-  the OS via `mx.clear_cache()` right after), ~1.4 GB for GigaAM.
+  the OS via `mx.clear_cache()` right after), ~1.8 GB for Podlodka
+  fp16, ~1.1 GB for Podlodka q8, ~1.4 GB for GigaAM.
   In API mode the warmup thread is skipped entirely and
   the local model is never loaded; switching from local to API via
   the menu triggers a restart that drops the previously-loaded
   weights.
 - GigaAM output is lowercase without punctuation (greedy CTC), and
   the model supports only Russian, English, Kazakh, Kyrgyz and
-  Uzbek — pick Whisper or API for other languages or for
+  Uzbek — pick Whisper, Podlodka or API for other languages or for
   punctuation-rich output.
+- The Podlodka fine-tune is strongest on Russian and English; on
+  other languages stock Whisper (or the API backend) remains the
+  better choice.
 - The bundled `.app` cannot transcode audio files: the
   `silero_vad.read_audio` and `torchaudio.load` paths raise
   `RuntimeError`. All production audio flows through

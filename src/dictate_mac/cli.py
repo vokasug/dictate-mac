@@ -31,6 +31,8 @@ from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
     MODEL_KIND_LOCAL,
+    MODEL_KIND_PODLODKA_FP16,
+    MODEL_KIND_PODLODKA_Q8,
     normalize_endpoint,
 )
 from dictate_mac.logutils import (
@@ -90,9 +92,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=MODEL_KIND_LOCAL,
         help=(
             "ASR backend. 'local' (default) runs mlx-whisper "
-            "in-process. 'gigaam' runs the GigaAM multilingual CTC "
-            "model in-process (ru/en/kk/ky/uz; ignores --language). "
-            "'api' POSTs 16 kHz mono WAVs to a "
+            "in-process. 'podlodka_fp16' and 'podlodka_q8' run the "
+            "Whisper-Podlodka-Turbo fine-tune (ru/en with punctuation) "
+            "in-process at the given quantization. 'gigaam' runs the "
+            "GigaAM multilingual CTC model in-process (ru/en/kk/ky/uz; "
+            "ignores --language). 'api' POSTs 16 kHz mono WAVs to a "
             "OpenAI-compatible endpoint; requires --api-endpoint, "
             "--api-key and --model-id. The CLI does NOT verify the "
             "endpoint at startup — failures surface in the log on "
@@ -163,8 +167,8 @@ def _build_parser() -> argparse.ArgumentParser:
     warmup = sub.add_parser(
         "warmup",
         help=(
-            "Download the selected local model (whisper or GigaAM, "
-            "see --model-kind) into the Hugging Face cache and "
+            "Download the selected local model (whisper, Podlodka or "
+            "GigaAM, see --model-kind) into the Hugging Face cache and "
             "(optionally) run a microphone sanity check. Exits 0 on "
             "success."
         ),
@@ -244,6 +248,25 @@ def _download_model(model_kind: str = MODEL_KIND_LOCAL) -> Path:
                 allow_patterns=["config.json", "manifest.json", "model.safetensors"],
             )
         )
+        logger.info("model ready at %s", local_dir)
+        return local_dir
+
+    if model_kind in (MODEL_KIND_PODLODKA_FP16, MODEL_KIND_PODLODKA_Q8):
+        from dictate_mac.transcriber import (
+            PODLODKA_REPO,
+            PODLODKA_REVISION,
+            PODLODKA_VARIANTS,
+            _podlodka_model_path,
+        )
+
+        variant = PODLODKA_VARIANTS[model_kind]
+        logger.info(
+            "downloading %s (%s, revision %s) …",
+            PODLODKA_REPO,
+            variant,
+            PODLODKA_REVISION[:12],
+        )
+        local_dir = Path(_podlodka_model_path(model_kind))
         logger.info("model ready at %s", local_dir)
         return local_dir
 

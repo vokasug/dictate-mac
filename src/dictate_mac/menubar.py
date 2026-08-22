@@ -94,10 +94,12 @@ from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
     MODEL_KIND_LOCAL,
+    MODEL_KIND_PODLODKA_FP16,
+    MODEL_KIND_PODLODKA_Q8,
     normalize_endpoint,
 )
 from dictate_mac.state import DictationMachine, Settings, State
-from dictate_mac.transcriber import GIGAAM_REPO, MODEL_REPO
+from dictate_mac.transcriber import GIGAAM_REPO, MODEL_REPO, PODLODKA_REPO
 
 logger = logging.getLogger("dictate_mac.menubar")
 
@@ -157,6 +159,19 @@ _STATUS_LABELS_GIGAAM: dict[State, str] = {
     State.LOADING_MODEL: "Loading GigaAM into RAM…",
 }
 
+# Download/load labels for the two Podlodka variants — swapped in by
+# the status timer while either Podlodka kind is active.
+_STATUS_LABELS_PODLODKA: dict[str, dict[State, str]] = {
+    MODEL_KIND_PODLODKA_FP16: {
+        State.DOWNLOADING_MODEL: "Downloading Podlodka fp16 model…",
+        State.LOADING_MODEL: "Loading Podlodka fp16 into RAM…",
+    },
+    MODEL_KIND_PODLODKA_Q8: {
+        State.DOWNLOADING_MODEL: "Downloading Podlodka q8 model…",
+        State.LOADING_MODEL: "Loading Podlodka q8 into RAM…",
+    },
+}
+
 
 class MenubarApp(rumps.App):
     """NSStatusItem-driven dictation daemon.
@@ -207,12 +222,13 @@ class MenubarApp(rumps.App):
             self._lang_parent.add(item)
 
         # ---- model submenu -------------------------------------------
-        # Disabled header + three clickable rows: a local mlx-whisper
-        # row and a local GigaAM row that switch back without prompting,
-        # and an API row that opens the credentials dialog (see
-        # model_settings_dialog.py). The API row's title carries the
-        # active endpoint host so the user knows where audio will go
-        # without re-opening the dialog.
+        # Disabled header + five clickable rows: the stock local
+        # mlx-whisper row, the two Whisper-Podlodka-Turbo variant rows
+        # (fp16 / q8), a local GigaAM row — all switching back without
+        # prompting — and an API row that opens the credentials dialog
+        # (see model_settings_dialog.py). The API row's title carries
+        # the active endpoint host so the user knows where audio will
+        # go without re-opening the dialog.
         self._model_header = rumps.MenuItem(MODEL_HEADER, callback=None)
         try:
             self._model_header._menuitem.setEnabled_(False)
@@ -222,6 +238,18 @@ class MenubarApp(rumps.App):
         self._model_local_item = rumps.MenuItem(
             self._format_model_local_title(settings.model_kind),
             callback=self._select_model_local,
+        )
+        self._model_podlodka_fp16_item = rumps.MenuItem(
+            self._format_model_podlodka_title(
+                MODEL_KIND_PODLODKA_FP16, settings.model_kind
+            ),
+            callback=self._select_model_podlodka_fp16,
+        )
+        self._model_podlodka_q8_item = rumps.MenuItem(
+            self._format_model_podlodka_title(
+                MODEL_KIND_PODLODKA_Q8, settings.model_kind
+            ),
+            callback=self._select_model_podlodka_q8,
         )
         self._model_gigaam_item = rumps.MenuItem(
             self._format_model_gigaam_title(settings.model_kind),
@@ -275,6 +303,8 @@ class MenubarApp(rumps.App):
             None,  # separator
             self._model_header,
             self._model_local_item,
+            self._model_podlodka_fp16_item,
+            self._model_podlodka_q8_item,
             self._model_gigaam_item,
             self._model_api_item,
             None,  # separator
@@ -551,6 +581,15 @@ class MenubarApp(rumps.App):
         return f"{prefix}Local Whisper ({MODEL_REPO})"
 
     @staticmethod
+    def _format_model_podlodka_title(kind: str, active_kind: str) -> str:
+        prefix = CHECK_GLYPH if active_kind == kind else "  "
+        variant = "fp16" if kind == MODEL_KIND_PODLODKA_FP16 else "q8"
+        return (
+            f"{prefix}Local Whisper Podlodka {variant} "
+            f"({PODLODKA_REPO})"
+        )
+
+    @staticmethod
     def _format_model_gigaam_title(active_kind: str) -> str:
         prefix = CHECK_GLYPH if active_kind == MODEL_KIND_GIGAAM else "  "
         return f"{prefix}Local GigaAM ({GIGAAM_REPO})"
@@ -638,6 +677,32 @@ class MenubarApp(rumps.App):
         self._update_language_menu_enabled()
         self._trigger_model_restart()
 
+    def _select_model_podlodka_fp16(self, _sender) -> None:
+        """Switch to the local Whisper Podlodka fp16 model and restart."""
+        if self._settings.model_kind == MODEL_KIND_PODLODKA_FP16:
+            return
+        logger.info(
+            "model switched: %s -> podlodka fp16", self._settings.model_kind
+        )
+        self._settings.model_kind = MODEL_KIND_PODLODKA_FP16
+        self._persist_settings()
+        self._refresh_model_menu()
+        self._update_language_menu_enabled()
+        self._trigger_model_restart()
+
+    def _select_model_podlodka_q8(self, _sender) -> None:
+        """Switch to the local Whisper Podlodka q8 model and restart."""
+        if self._settings.model_kind == MODEL_KIND_PODLODKA_Q8:
+            return
+        logger.info(
+            "model switched: %s -> podlodka q8", self._settings.model_kind
+        )
+        self._settings.model_kind = MODEL_KIND_PODLODKA_Q8
+        self._persist_settings()
+        self._refresh_model_menu()
+        self._update_language_menu_enabled()
+        self._trigger_model_restart()
+
     def _select_model_gigaam(self, _sender) -> None:
         """Switch to the local GigaAM multilingual CTC model and restart."""
         if self._settings.model_kind == MODEL_KIND_GIGAAM:
@@ -702,6 +767,16 @@ class MenubarApp(rumps.App):
         new_local = self._format_model_local_title(self._settings.model_kind)
         if self._model_local_item.title != new_local:
             self._model_local_item.title = new_local
+        new_fp16 = self._format_model_podlodka_title(
+            MODEL_KIND_PODLODKA_FP16, self._settings.model_kind
+        )
+        if self._model_podlodka_fp16_item.title != new_fp16:
+            self._model_podlodka_fp16_item.title = new_fp16
+        new_q8 = self._format_model_podlodka_title(
+            MODEL_KIND_PODLODKA_Q8, self._settings.model_kind
+        )
+        if self._model_podlodka_q8_item.title != new_q8:
+            self._model_podlodka_q8_item.title = new_q8
         new_gigaam = self._format_model_gigaam_title(self._settings.model_kind)
         if self._model_gigaam_item.title != new_gigaam:
             self._model_gigaam_item.title = new_gigaam
@@ -754,6 +829,10 @@ class MenubarApp(rumps.App):
                 and state in _STATUS_LABELS_GIGAAM
             ):
                 label = _STATUS_LABELS_GIGAAM[state]
+            elif state in _STATUS_LABELS_PODLODKA.get(
+                self._settings.model_kind, {}
+            ):
+                label = _STATUS_LABELS_PODLODKA[self._settings.model_kind][state]
             else:
                 label = _STATUS_LABELS.get(state, state.value)
             new_title = f"Status: {label}"

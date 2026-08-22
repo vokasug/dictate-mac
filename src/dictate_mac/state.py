@@ -52,6 +52,8 @@ from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
     MODEL_KIND_LOCAL,
+    MODEL_KIND_PODLODKA_FP16,
+    MODEL_KIND_PODLODKA_Q8,
 )
 from dictate_mac.hotkey import (
     K_VK_ESCAPE,
@@ -243,6 +245,18 @@ class DictationMachine:
                 State.DOWNLOADING_MODEL,
                 "[warmup] downloading ai-babai/gigaam-multilingual-mlx "
                 "(first run; ~1.2 GB)",
+            )
+        elif kind == MODEL_KIND_PODLODKA_FP16:
+            await self._publish_state(
+                State.DOWNLOADING_MODEL,
+                "[warmup] downloading Whisper Podlodka fp16 "
+                "(first run; ~1.6 GB)",
+            )
+        elif kind == MODEL_KIND_PODLODKA_Q8:
+            await self._publish_state(
+                State.DOWNLOADING_MODEL,
+                "[warmup] downloading Whisper Podlodka q8 "
+                "(first run; ~0.9 GB)",
             )
         else:
             await self._publish_state(
