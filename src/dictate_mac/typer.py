@@ -1,6 +1,6 @@
 """Quartz Unicode keystroke injector for dictate-mac.
 
-Phase 5: type text into the focused window via raw CGEvent.
+Types text into the focused window via raw CGEvent.
 
 Why raw CGEvent and not pynput:
 
@@ -35,7 +35,6 @@ def _post_unicode(chars: str) -> None:
         CGEventKeyboardSetUnicodeString,
         CGEventPost,
         kCGHIDEventTap,
-        kCGEventFlagMaskCommand,
     )
 
     if not chars:
@@ -46,9 +45,6 @@ def _post_unicode(chars: str) -> None:
     CGEventKeyboardSetUnicodeString(down, len(chars), chars)
     CGEventKeyboardSetUnicodeString(up, len(chars), chars)
 
-    # Release the Command modifier so the keystroke isn't treated as a
-    # shortcut. CGEventPost ignores extra flags but it doesn't hurt to
-    # be explicit.
     CGEventPost(kCGHIDEventTap, down)
     CGEventPost(kCGHIDEventTap, up)
 

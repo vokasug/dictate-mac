@@ -84,14 +84,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.6.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.6.0-macos.zip)
+[`DictateMac-v0.6.1-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.6.1-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
-Compressed download is ~110–140 MB; the extracted `.app` is ~284 MB.
+Compressed download is ~93 MB; the extracted `.app` is ~284 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.5.0-macos.zip
+shasum -a 256 DictateMac-v0.6.1-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -100,7 +100,7 @@ shasum -a 256 DictateMac-v0.5.0-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.6.0-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.6.1-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -213,7 +213,7 @@ The result is fully self-contained — everything except the ~1.5 GB
 local Whisper weights (downloaded at first launch) is bundled.
 **Bundle size: ~284 MB.** Dev-side details (stubs, post-build strip
 pass, install_name / signature rewrites) live in
-[`AGENTS.md` § 6](../blob/main/AGENTS.md#6-build-pipeline).
+[`AGENTS.md` § 6](AGENTS.md#6-build-pipeline-buildsh).
 
 ## Usage
 
@@ -569,53 +569,27 @@ opens the log file in your default `.log` viewer (Console.app).
 
 ## How it works
 
-```
-┌────────── dictate-mac daemon (Python 3.13) ──────────────────────┐
-│                                                                   │
-│   ┌────────────────────┐    ┌──────────────────┐                  │
-│   │ Menu bar UI        │    │ Hotkey watcher   │                  │
-│   │ rumps NSStatusItem │    │ Quartz CGEvent   │                  │
-│   │ waveform + Status  │    │ tap (Right Opt)  │                  │
-│   └─────────┬──────────┘    └────────┬─────────┘                  │
-│             │ state (0.5 s poll)     │ events                     │
-│             ▼                        ▼                            │
-│            DictationMachine (asyncio worker thread)               │
-│            recorder · silero-vad · ASR backend · typer           │
-│                              │                                   │
-│          ┌───────────────────┼─────────────────┐                 │
-│          ▼                   ▼                 ▼                 │
-│   mlx-whisper (local)  GigaAM CTC (local)  POST /v1/audio/      │
-│   stock or Podlodka    ~1.4 GB RAM         transcriptions (api)  │
-│   ~1.1–1.8 GB RAM                                                │
-│                                                                   │
-│                          │ text                                  │
-│                          ▼                                       │
-│       Quartz CGEvent Unicode keystroke typer                      │
-│       (CGEventKeyboardSetUnicodeString)                           │
-└───────────────────────────────────────────────────────────────────┘
-```
+The menu bar app (rumps / NSApp, main thread) polls a thread-safe
+state snapshot from an asyncio worker thread that owns the pipeline:
+PortAudio recorder → silero-vad trim → the ASR backend selected by
+`model_kind` in the config file → a Quartz CGEvent Unicode typer that
+injects the text keystroke-by-keystroke into the focused window. A
+third thread runs the Quartz CGEventTap that watches Right Option (and
+Esc as the recording-cancel key) and feeds events into the worker
+through a bounded queue.
 
-Three threads at runtime: **Main** (rumps / NSApp — menu + 0.5 s
-status refresh), **Worker** (asyncio state machine — recorder + ASR
-+ typer), **CFRunLoop** (CGEventTap for Right Option, pushes events
-into a thread-safe `queue.Queue`). Communication is `queue.Queue`
-plus a `threading.Lock`-guarded `state` property — no extra
-primitives.
+In a **local** mode the daemon downloads the model weights (if not
+cached) and loads them into RAM before arming the hotkey — `Status:
+Ready` only appears after that completes. In **API** mode the
+local-model load is skipped, `Ready` arrives within a second, and each
+recording is POSTed to the configured gateway. silero-vad's ONNX model
+loads lazily on the first recording. Whisper recognitions take ~3 s on
+M1; GigaAM is typically faster on its five supported languages; API
+mode takes only the gateway round-trip (typically 0.3–1 s).
 
-The ASR backend is selected at startup from the config file's
-`model_kind` field. In **local** mode the daemon downloads the
-Whisper model (if not cached) and loads it into RAM before arming
-the hotkey; **podlodka_fp16** / **podlodka_q8** do the same with
-their variant subfolder of the Podlodka repo; **gigaam** mode does
-the same with the GigaAM artifact.
-Status reaches `Ready` only after that completes. In
-**API** mode the local-model load is skipped, `Status: Ready`
-arrives within a second, and audio is POSTed to the configured
-gateway per recording. silero-vad's ONNX model loads lazily on
-the first recording. Whisper recognitions take ~3 s on M1;
-GigaAM recognitions are typically faster on its five supported
-languages; API-mode recognitions take only the round-trip time
-to the gateway (typically 0.3–1 s).
+The full architecture diagram, threading table, and the rationale
+behind each of these choices live in
+[`AGENTS.md` § 4–5](AGENTS.md#4-architecture-and-threading).
 
 ## Verifying & troubleshooting
 
@@ -629,13 +603,12 @@ dictate-mac selftest --no-mic   # skip the microphone roundtrip
 If you installed via the `.app` rather than from a venv, the same
 subcommands are reachable via the bundle's executable
 (``/Applications/DictateMac.app/Contents/MacOS/DictateMac selftest``).
-Exit code 0 if all 28 checks pass, 1 otherwise. Each check prints a
+Exit code 0 if all 27 checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail; the checks are
 `model-load`, `vad-silence`, `vad-speech-like`, `asr-smoke`,
 `gigaam-model-load`, `gigaam-asr-smoke`, `typer-dispatch`,
 `ssl-certifi`, `config-v1-migration`, `config-invalid-endpoint`,
-`config-api-required-when-api`, `config-gigaam-kind`,
-`config-podlodka-kinds`,
+`config-api-required-when-api`, `config-local-kinds`,
 `audio-wav-roundtrip`, `api-transcribe-headers`,
 `api-transcribe-auto-language`, `api-models-check`, `gigaam-dispatch`,
 `whisper-decode-options`, `gigaam-chunking`, `podlodka-dispatch`,
@@ -717,6 +690,6 @@ revoke `com.local.dictate-mac` in
   (`silero_vad.read_audio("foo.wav")` and `torchaudio.load()` both
   raise `RuntimeError`). All audio in the bundle flows through
   PortAudio → `numpy.ndarray` → silero-vad → whisper — the only
-  path we use. Dev-side rationale and how the stubs work around the
-  upstream torch / torchaudio wheels lives in
-  [`AGENTS.md`](../blob/main/AGENTS.md#6-build-pipeline).
+   path we use. Dev-side rationale and how the stubs work around the
+   upstream torch / torchaudio wheels lives in
+   [`AGENTS.md`](AGENTS.md#6-build-pipeline-buildsh).

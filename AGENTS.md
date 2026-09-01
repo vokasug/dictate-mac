@@ -155,7 +155,7 @@ reach across module boundaries — use the public surface listed.
 | Module                    | Owns                                                          | Public surface                                                        |
 | ------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------- |
 | `cli.py`                  | argparse, subcommand dispatch, app-bundle detection           | `main`, `cmd_daemon`, `cmd_warmup`, `cmd_selftest`, `cmd_menubar`      |
-| `audio.py`                | mic capture + VAD trimming                                    | `Recorder`, `AudioConfig`, `trim_silence`, `has_speech`                |
+| `audio.py`                | mic capture + VAD trimming                                    | `Recorder`, `trim_silence`                                              |
 | `transcriber.py`          | ASR backends: local mlx-whisper (stock + Podlodka fp16/q8) + GigaAM CTC + OpenAI-compatible API | `transcribe(audio, language, *, model_kind, api_*)`, `check_api_model_available`, `ensure_warm_async`, `warm`, `is_model_cached`, `model_loaded`, `gigaam_loaded`, `MODEL_REPO`, `PODLODKA_REPO`, `PODLODKA_REVISION`, `PODLODKA_VARIANTS`, `_audio_to_wav_bytes` |
 | `typer.py`                | keystroke injection into focused window                       | `type_text(text, backend, per_char_delay_ms)`, `type_text_quartz`, `type_text_osascript` |
 | `hotkey.py`               | global Right Option watcher (+ Esc cancel)                    | `HotkeyWatcher(output_queue)`, `HotkeyEdge`, `HotkeyEvent`              |
@@ -488,16 +488,14 @@ the reason is still valid after you check the source.
   file — only the menu bar reads/writes it. The menu bar source is
   `Foundation.NSLocale.preferredLanguages()` (PyObjC, ~1 ms,
   in-process).
-- **Hot-apply language and model kind.** `mlx_whisper.transcribe`
+- **Hot-apply language.** `mlx_whisper.transcribe`
   reads `language` per call. Switching between two languages from the
   menu updates the in-memory `Settings.language`, persists the
   choice, and the next recording uses the new value. Only the
   encoder's first-pass language-token prediction pays the one-time
-  ~0.3 s switch cost; the model itself is not reloaded. The
-  `model_kind` switch is similarly hot: the next recording after a
-  menu switch uses the new backend with no warmup delay — the API
-  path has no in-process model to load, the local path's model
-  stays in RAM regardless of which mode is selected.
+  ~0.3 s switch cost; the model itself is not reloaded. (The
+  `model_kind` switch is NOT hot — see "Model switching requires an
+  app restart" above.)
 - **Rumps menu bar + py2app `.app`.** `rumps` is a PyObjC wrapper
   around `NSStatusItem` — small, idiomatic, runs `NSApp` on the main
   thread. `py2app` produces a real `.app` bundle with
@@ -530,10 +528,16 @@ the reason is still valid after you check the source.
 5. Restore the source venv in a `finally:` block (always, even on
    build failure).
 6. Run post-build steps on `dist/DictateMac.app`:
-   - `_extract_native_runtime_libs` — rewrite `python313.zip` so
-     `dlopen` can find `libportaudio.dylib` and `_sounddevice_data`;
-     also removes the zip copies of `certifi` so the on-disk package
-     (with `cacert.pem`) is the only one importable.
+   - `_extract_native_runtime_libs` — the build's single
+     `python313.zip` rewrite: extracts `_sounddevice_data` (so
+     `dlopen` can find `libportaudio.dylib`), removes the zip copies
+     of every package that must resolve from its on-disk mirror
+     (`mlx`, `certifi` with `cacert.pem`, `onnxruntime`,
+     `gigaam_multilingual_mlx`, `mlx_whisper`, `silero_vad`,
+     `psutil`, …), and drops the stdlib `test/` tree, the unreachable
+     heavy wheels (`torch`/`numba`/`llvmlite`/`sympy`/`networkx`/
+     `mpmath`/`scipy`) and every `__pycache__` zip entry in the same
+     pass.
    - `_install_torchaudio_stub` — wipe bundled `torchaudio/` and
      write a Python stub (no `libtorchaudio.abi3.so`). The real
      torchaudio wheel's `libtorchaudio` has an `install_name` chain
@@ -545,10 +549,12 @@ the reason is still valid after you check the source.
    - `_install_timing_stub` — replace `mlx_whisper.timing` with a
      stub that raises on `add_word_timestamps`.
    - `_strip_bundle_junk` — drop `torch/`, `numba/`, `llvmlite/`,
-     `sympy/`, `networkx/`, `scipy/optimize/` and the rest of
-     `scipy/` not reachable at runtime, `*.dSYM/`, stdlib `test/`,
-     `numpy/tests/`, `numpy/_core/tests/`, `numpy/f2py/`,
-     `numpy/typing/`, `numpy/_examples`, `numpy/include/`,
+     `sympy/`, `networkx/`, `scipy/` (guard only — scipy is no longer
+     bundled at all; it is neither in `OPTIONS['packages']` nor
+     reachable in the modulegraph after the venv pre-patch),
+     `*.dSYM/`, `numpy/_core/tests/`, `numpy/lib/tests/`,
+     `numpy/f2py/`, `numpy/typing/`, `numpy/_examples`,
+     `numpy/include/`,
      `numpy/{strings,char,core,rec,ctypeslib,dtypes,exceptions,
      ma,polynomial}`, `mlx/include/`, all `*.pyi` stubs,
       `huggingface_hub/{cli,inference,serialization,hub_mixin}`,
@@ -558,8 +564,7 @@ the reason is still valid after you check the source.
       benchmark/conversion tooling — kept: `__init__`, `_version`,
       `model`, `config`, `artifacts`, `quantization`),
       `silero_vad.jit` and
-      the four alt-opset `.onnx` variants, the top-level and
-      `data/silero_vad/` mirrors of `silero_vad.onnx`,
+      the four alt-opset `.onnx` variants,
       `Contents/Resources/include/` and `openssl.ca/`,
       duplicate `mlx.metallib`/`libmlx.dylib`/`libjaccl.dylib`.
     - `_rewrite_boot_script` — replace the build-time venv path in
@@ -695,8 +700,8 @@ no supported match maps to `"auto"`.
 
 ## 10. Testing
 
-`dictate-mac selftest [--no-mic]` runs twenty-eight checks; optionally a
-twenty-ninth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
+`dictate-mac selftest [--no-mic]` runs twenty-seven checks; optionally a
+twenty-eighth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 
 1. **model-load** — `mlx_whisper` weights load into RAM.
 2. **vad-silence** — 1 s of zeros → VAD returns `[]`.
@@ -721,53 +726,51 @@ twenty-ninth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
     bare host, etc.) are rejected by `PersistedSettings.is_valid`.
 11. **config-api-required-when-api** — `model_kind="local"` accepts
     empty API fields; `model_kind="api"` rejects partial ones.
-12. **config-gigaam-kind** — `model_kind="gigaam"` is valid without
-    API fields and survives a save/load roundtrip.
-13. **config-podlodka-kinds** — both Podlodka kinds
-    (`podlodka_fp16`/`podlodka_q8`) are valid without API fields and
-    survive a save/load roundtrip.
-14. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
+12. **config-local-kinds** — `gigaam`, `podlodka_fp16` and
+    `podlodka_q8` are all valid without API fields and each survives a
+    save/load roundtrip.
+13. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
     amplitude preserved to within one LSB.
-15. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
+14. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
     confirms the URL, multipart `model` field, `Authorization:
     Bearer` header and (when configured) `language` field are all
     wired correctly.
-16. **api-transcribe-auto-language** — when `language="auto"`, the
+15. **api-transcribe-auto-language** — when `language="auto"`, the
     `language` field is omitted from the form so the gateway falls
     back to its own detection.
-17. **api-models-check** — mocked `GET /v1/models` handles 200+id,
+16. **api-models-check** — mocked `GET /v1/models` handles 200+id,
     200-missing-id, 401, 404 and 500 correctly, and never leaks the
     fake API key string into any error.
-18. **gigaam-dispatch** — `transcribe(model_kind="gigaam")` routes to
+17. **gigaam-dispatch** — `transcribe(model_kind="gigaam")` routes to
     the GigaAM path (mocked) and the default still routes to whisper.
-19. **whisper-decode-options** — the whisper call always passes
+18. **whisper-decode-options** — the whisper call always passes
     `condition_on_previous_text=True`, `temperature=(0.0, 0.2, 0.4)`
     and `best_of=3`; it sends a style `initial_prompt` for the 30
     mapped languages (`ru`/`en`/`zh`/`de` checked) and none for
     `auto` or unmapped languages.
-20. **gigaam-chunking** — a 45 s buffer is decoded as three 20 s /
+19. **gigaam-chunking** — a 45 s buffer is decoded as three 20 s /
     2 s-overlap windows (mocked model), midpoint stitching dedupes
     overlap words, and a 5 s buffer stays one-shot.
-21. **podlodka-dispatch** — `transcribe(model_kind="podlodka_fp16"/
+20. **podlodka-dispatch** — `transcribe(model_kind="podlodka_fp16"/
     "podlodka_q8")` routes to the local whisper path (mocked) with
     the kind forwarded for weight selection.
-22. **warmup-retry** — a simulated warmup failure publishes a
+21. **warmup-retry** — a simulated warmup failure publishes a
     retryable ERROR with the hotkey watcher still armed; a synthetic
     Right Option press re-runs the warmup into READY.
-23. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
+22. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
     open raising `PortAudioError -9986` triggers one
     `sd._terminate()`/`sd._initialize()` cycle and a successful retry.
-24. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
+23. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
     cancel press; Cmd+Esc is filtered out.
-25. **podlodka-fp16-model-load** — Podlodka fp16 weights download
+24. **podlodka-fp16-model-load** — Podlodka fp16 weights download
     (first run) and load into RAM via `warm(MODEL_KIND_PODLODKA_FP16)`;
     any previously loaded whisper-family model is released first.
-26. **podlodka-fp16-asr-smoke** — `transcribe(model_kind=
+25. **podlodka-fp16-asr-smoke** — `transcribe(model_kind=
     "podlodka_fp16")` returns a string of any length on synthetic
     audio.
-27. **podlodka-q8-model-load** — same as 25 for the q8 quantization.
-28. **podlodka-q8-asr-smoke** — same as 26 for the q8 quantization.
-29. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
+26. **podlodka-q8-model-load** — same as 24 for the q8 quantization.
+27. **podlodka-q8-asr-smoke** — same as 25 for the q8 quantization.
+28. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
     report durations.
 
 `dictate-mac warmup --skip-mic-test` is the deterministic "is it

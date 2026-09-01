@@ -186,7 +186,6 @@ class ApiModelSettingsDialog:
     LABEL_FIELD_GAP = 6
     EYE_SYMBOL_POINT_SIZE = 16.0
     TOP_PADDING = 22
-    HINT_TEXT_COLOR = "white"
 
     def __init__(self) -> None:
         self._window = None

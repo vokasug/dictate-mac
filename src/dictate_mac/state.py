@@ -1,7 +1,5 @@
 """Asyncio state machine that drives the dictation loop.
 
-Phase 4. Phase 9 extends the lifecycle with pre-ready phases.
-
 Lifecycle:
 
     STARTING  ──► DOWNLOADING_MODEL (first run only)
@@ -25,8 +23,8 @@ The ``State`` enum is the user-facing status string — the menu bar
 shows ``"Status: <state.value>"`` for the current enum value. Keep the
 strings short and human-readable.
 
-Phase 15 extends ``Settings`` with a ``language`` field (an ISO-639-1
-code or the sentinel ``"auto"``). The hot-applied switch works without
+``Settings.language`` holds an ISO-639-1
+code or the sentinel ``"auto"``. The hot-applied switch works without
 a model reload because ``mlx_whisper.transcribe`` reads ``language``
 per-call from the encoder — only the menubar persists this value to
 ``~/.config/dictate-mac/config.json``; the CLI daemon subcommand
@@ -117,10 +115,8 @@ class DictationMachine:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or Settings()
-        # Internal state used by the asyncio pump. Mutated only from the
-        # asyncio loop / pump methods.
-        self._state = State.STARTING
-        # Mirror published to other threads (menu bar timer) under a lock.
+        # Published state, read by other threads (menu bar timer) under
+        # a lock; written only from the asyncio pump via _publish_state.
         self._state_lock = threading.Lock()
         self._state_value: State = State.STARTING
 
@@ -327,7 +323,7 @@ class DictationMachine:
         ``ensure_warm_async`` starts a fresh background thread because
         the previous one exited with the failure.
         """
-        assert self._state == State.ERROR and self._warmup_failed
+        assert self.state == State.ERROR and self._warmup_failed
         logger.info("[warmup] retry requested via Right Option")
         self._warmup_failed = False
         self._warmup_error = None
@@ -383,17 +379,17 @@ class DictationMachine:
         option_presses = [ev for ev in presses if ev.keycode != K_VK_ESCAPE]
         escape_presses = [ev for ev in presses if ev.keycode == K_VK_ESCAPE]
 
-        if self._state == State.READY and option_presses:
+        if self.state == State.READY and option_presses:
             await self._start_recording()
         elif (
-            self._state == State.ERROR
+            self.state == State.ERROR
             and self._warmup_failed
             and option_presses
         ):
             await self._retry_warmup()
-        elif self._state == State.RECORDING and escape_presses:
+        elif self.state == State.RECORDING and escape_presses:
             await self._cancel_recording()
-        elif self._state == State.RECORDING and option_presses:
+        elif self.state == State.RECORDING and option_presses:
             await self._stop_and_process()
 
         # Light sleep so we don't spin when no events arrive.
@@ -409,7 +405,7 @@ class DictationMachine:
             await self._publish_state(State.READY, "[idle] ready")
 
     async def _cancel_recording(self) -> None:
-        assert self._state == State.RECORDING
+        assert self.state == State.RECORDING
         try:
             self._recorder.stop()
         except Exception as exc:  # noqa: BLE001
@@ -419,7 +415,7 @@ class DictationMachine:
         await self._publish_state(State.READY, "[idle] ready")
 
     async def _stop_and_process(self) -> None:
-        assert self._state == State.RECORDING
+        assert self.state == State.RECORDING
         try:
             audio = self._recorder.stop()
         except Exception as exc:  # noqa: BLE001
@@ -492,8 +488,7 @@ class DictationMachine:
         await self._publish_state(State.READY, "[idle] ready")
 
     async def _publish_state(self, new_state: State, message: str) -> None:
-        """Set internal + published state, log, and signal watchers."""
-        self._state = new_state
+        """Set the published state and log the transition."""
         with self._state_lock:
             self._state_value = new_state
         logger.info(message)

@@ -1,10 +1,8 @@
 """Command-line interface and entry point for dictate-mac.
 
-Responsibilities:
-
 * Parse global options: ``--quiet``, ``--log-level``, ``--output``.
 * Default invocation (``dictate-mac`` with no subcommand) — launch
-  the menu bar app (Phase 9). This is the recommended interface for
+  the menu bar app. This is the recommended interface for
   everyday use.
 * Subcommand ``daemon`` — start the asyncio state machine in plain
   CLI mode (no menu bar). Same code path as the menu bar app, minus
@@ -22,7 +20,6 @@ import argparse
 import logging
 import signal
 import sys
-from pathlib import Path
 from typing import Sequence
 
 from dictate_mac import __version__
@@ -31,19 +28,13 @@ from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
     MODEL_KIND_LOCAL,
-    MODEL_KIND_PODLODKA_FP16,
-    MODEL_KIND_PODLODKA_Q8,
     normalize_endpoint,
 )
 from dictate_mac.logutils import (
     DEFAULT_LOG_LEVEL,
-    LOG_FORMAT,
     configure_logging,
     is_app_bundle,
-    log_level_from_argv,
 )
-
-logger = logging.getLogger("dictate_mac")
 
 logger = logging.getLogger("dictate_mac")
 
@@ -213,68 +204,24 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _configure_logging(level: str) -> None:
-    """Set up logging handlers per Phase 10.
-
-    In ``.app`` bundle mode logs go to
-    ``~/Library/Logs/dictate-mac/dictate-mac.log`` (truncate-on-start);
-    in CLI mode they go to stderr.
-
-    Thin wrapper around :func:`dictate_mac.logutils.configure_logging`
-    kept for backwards compatibility with callers that have already
-    parsed ``--log-level`` from argparse.
-    """
-    configure_logging(level=level)
-
-
-def _download_model(model_kind: str = MODEL_KIND_LOCAL) -> Path:
+def _download_model(model_kind: str = MODEL_KIND_LOCAL) -> None:
     """Trigger the Hugging Face download for the selected local model.
 
-    mlx-whisper and gigaam-multilingual-mlx both download weights
-    lazily; we use ``huggingface_hub`` so the download progress is
-    visible and resumable.
+    Delegates to the transcriber's own download helpers so the repo
+    ids, revisions and allow-patterns live in exactly one place.
     """
-    from huggingface_hub import snapshot_download
+    from dictate_mac import transcriber
 
     if model_kind == MODEL_KIND_GIGAAM:
-        from dictate_mac.transcriber import _gigaam_repo_revision
-
-        repo_id, revision = _gigaam_repo_revision()
+        repo_id, revision = transcriber._gigaam_repo_revision()
         logger.info("downloading %s (revision %s) …", repo_id, revision)
-        local_dir = Path(
-            snapshot_download(
-                repo_id=repo_id,
-                revision=revision,
-                allow_patterns=["config.json", "manifest.json", "model.safetensors"],
-            )
-        )
-        logger.info("model ready at %s", local_dir)
-        return local_dir
+        transcriber._download_gigaam()
+        logger.info("download complete")
+        return
 
-    if model_kind in (MODEL_KIND_PODLODKA_FP16, MODEL_KIND_PODLODKA_Q8):
-        from dictate_mac.transcriber import (
-            PODLODKA_REPO,
-            PODLODKA_REVISION,
-            PODLODKA_VARIANTS,
-            _podlodka_model_path,
-        )
-
-        variant = PODLODKA_VARIANTS[model_kind]
-        logger.info(
-            "downloading %s (%s, revision %s) …",
-            PODLODKA_REPO,
-            variant,
-            PODLODKA_REVISION[:12],
-        )
-        local_dir = Path(_podlodka_model_path(model_kind))
-        logger.info("model ready at %s", local_dir)
-        return local_dir
-
-    repo_id = "mlx-community/whisper-large-v3-turbo"
-    logger.info("downloading %s …", repo_id)
-    local_dir = Path(snapshot_download(repo_id=repo_id))
+    logger.info("downloading model for kind=%s …", model_kind)
+    local_dir = transcriber._local_model_path(model_kind)
     logger.info("model ready at %s", local_dir)
-    return local_dir
 
 
 def _mic_test(seconds: float) -> None:
@@ -327,7 +274,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     Wires up the asyncio state machine, the Quartz CGEventTap hotkey
     watcher, mlx-whisper and the Unicode typer. Runs until Ctrl-C.
 
-    Per Phase 15: this entry point neither reads nor writes the
+    This entry point neither reads nor writes the
     persisted ``~/.config/dictate-mac/config.json`` file. All
     settings — language, ASR backend, API credentials — come from
     command-line flags.
@@ -413,7 +360,7 @@ def cmd_menubar(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    _configure_logging(args.log_level)
+    configure_logging(level=args.log_level, quiet=args.quiet)
     if is_app_bundle():
         logger.info("running from .app bundle: %s", sys.executable)
     logger.debug("argv=%r", argv if argv is not None else sys.argv[1:])
@@ -427,7 +374,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_selftest(args)
     if args.command == "daemon":
         return cmd_daemon(args)
-    # No subcommand → menu bar app (Phase 9 default). Trying to launch
+    # No subcommand → menu bar app (the default). Trying to launch
     # rumps on a non-mac host raises; surface a clean error.
     if args.command is None:
         try:

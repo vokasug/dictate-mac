@@ -32,6 +32,7 @@ from dictate_mac.audio import SAMPLE_RATE, Recorder, trim_silence
 from dictate_mac.transcriber import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
+    MODEL_KIND_LOCAL,
     MODEL_KIND_PODLODKA_FP16,
     MODEL_KIND_PODLODKA_Q8,
     _audio_to_wav_bytes,
@@ -85,13 +86,40 @@ def _synth_speech_like(
     return audio
 
 
-def test_model_load() -> Result:
+def _check_model_load(
+    name: str, model_kind: str, loaded: Callable[[], bool]
+) -> Result:
+    """Shared shape for every model-load check: warm, assert resident."""
     t0 = time.perf_counter()
-    warm()
+    warm(model_kind)
     dt = time.perf_counter() - t0
-    if not model_loaded():
-        return Result("model-load", False, "model not loaded after warm()")
-    return Result("model-load", True, f"loaded in {dt:.2f}s")
+    if not loaded():
+        return Result(name, False, f"{model_kind} not loaded after warm()")
+    return Result(name, True, f"loaded in {dt:.2f}s")
+
+
+def _check_asr_smoke(name: str, model_kind: str, language: str = "auto") -> Result:
+    """Shared shape for every ASR smoke check: synthetic audio in, str out.
+
+    The recognized content is not asserted — the synthetic signal is
+    not real speech; the check only proves the pipeline runs.
+    """
+    audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.8)
+    t0 = time.perf_counter()
+    text = transcribe(audio, language=language, model_kind=model_kind)
+    dt = time.perf_counter() - t0
+    if not isinstance(text, str):
+        return Result(name, False, f"expected str, got {type(text).__name__}")
+    return Result(
+        name,
+        True,
+        f"transcribe(model_kind={model_kind!r}) returned a {len(text)}-char "
+        f"string in {dt:.2f}s",
+    )
+
+
+def test_model_load() -> Result:
+    return _check_model_load("model-load", MODEL_KIND_LOCAL, model_loaded)
 
 
 def test_vad_silence() -> Result:
@@ -141,45 +169,15 @@ def test_vad_speech_like() -> Result:
 
 
 def test_asr_smoke(language: str = "auto") -> Result:
-    audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.8)
-    t0 = time.perf_counter()
-    text = transcribe(audio, language=language)
-    dt = time.perf_counter() - t0
-    if not isinstance(text, str):
-        return Result("asr-smoke", False, f"expected str, got {type(text).__name__}")
-    return Result(
-        "asr-smoke",
-        True,
-        f"transcribe(language={language!r}) returned a {len(text)}-char "
-        f"string in {dt:.2f}s "
-        "(content is not asserted — synthetic signal is not real speech)",
-    )
+    return _check_asr_smoke("asr-smoke", MODEL_KIND_LOCAL, language)
 
 
 def test_gigaam_model_load() -> Result:
-    t0 = time.perf_counter()
-    warm(MODEL_KIND_GIGAAM)
-    dt = time.perf_counter() - t0
-    if not gigaam_loaded():
-        return Result("gigaam-model-load", False, "gigaam model not loaded after warm()")
-    return Result("gigaam-model-load", True, f"loaded in {dt:.2f}s")
+    return _check_model_load("gigaam-model-load", MODEL_KIND_GIGAAM, gigaam_loaded)
 
 
 def test_gigaam_asr_smoke() -> Result:
-    audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.8)
-    t0 = time.perf_counter()
-    text = transcribe(audio, model_kind=MODEL_KIND_GIGAAM)
-    dt = time.perf_counter() - t0
-    if not isinstance(text, str):
-        return Result(
-            "gigaam-asr-smoke", False, f"expected str, got {type(text).__name__}"
-        )
-    return Result(
-        "gigaam-asr-smoke",
-        True,
-        f"gigaam transcribe returned a {len(text)}-char string in {dt:.2f}s "
-        "(content is not asserted — synthetic signal is not real speech)",
-    )
+    return _check_asr_smoke("gigaam-asr-smoke", MODEL_KIND_GIGAAM)
 
 
 def test_typer_dispatch() -> Result:
@@ -427,75 +425,25 @@ def test_config_missing_api_fields_when_kind_local() -> Result:
     )
 
 
-def test_config_gigaam_kind_valid() -> Result:
-    """model_kind='gigaam' is a first-class kind: is_valid accepts it
-    with empty API fields, and a save/load roundtrip preserves it."""
+def test_config_local_kinds_valid() -> Result:
+    """Every local (non-API) kind is first-class: accepted by is_valid
+    with empty API fields and preserved by a save/load roundtrip."""
     from dictate_mac import config as config_mod
     from dictate_mac.config import PersistedSettings
 
-    if config_mod.MODEL_KIND_GIGAAM not in config_mod.MODEL_KINDS:
-        return Result(
-            "config-gigaam-kind",
-            False,
-            "MODEL_KIND_GIGAAM missing from MODEL_KINDS",
-        )
-
-    s = PersistedSettings(model_kind=config_mod.MODEL_KIND_GIGAAM, language="ru")
-    if not s.is_valid():
-        return Result(
-            "config-gigaam-kind",
-            False,
-            "gigaam kind with empty API fields should be valid",
-        )
-
-    with tempfile.TemporaryDirectory() as td:
-        target = Path(td) / "config.json"
-        original = config_mod.config_path
-        try:
-            config_mod.config_path = lambda: target
-            config_mod.save(s)
-            loaded = config_mod.load()
-        finally:
-            config_mod.config_path = original
-        if loaded.model_kind != config_mod.MODEL_KIND_GIGAAM:
-            return Result(
-                "config-gigaam-kind",
-                False,
-                f"roundtrip lost model_kind: {loaded.model_kind!r}",
-            )
-        if loaded.language != "ru":
-            return Result(
-                "config-gigaam-kind",
-                False,
-                f"roundtrip lost language: {loaded.language!r}",
-            )
-    return Result(
-        "config-gigaam-kind",
-        True,
-        "gigaam kind valid without API fields; save/load roundtrip preserves it",
-    )
-
-
-def test_config_podlodka_kinds_valid() -> Result:
-    """Both Podlodka kinds are first-class: valid without API fields
-    and preserved by a save/load roundtrip."""
-    from dictate_mac import config as config_mod
-    from dictate_mac.config import PersistedSettings
-
-    for kind in (
+    kinds = (
+        config_mod.MODEL_KIND_GIGAAM,
         config_mod.MODEL_KIND_PODLODKA_FP16,
         config_mod.MODEL_KIND_PODLODKA_Q8,
-    ):
+    )
+    for kind in kinds:
         if kind not in config_mod.MODEL_KINDS:
             return Result(
-                "config-podlodka-kinds",
-                False,
-                f"{kind!r} missing from MODEL_KINDS",
+                "config-local-kinds", False, f"{kind!r} missing from MODEL_KINDS"
             )
-        s = PersistedSettings(model_kind=kind, language="ru")
-        if not s.is_valid():
+        if not PersistedSettings(model_kind=kind, language="ru").is_valid():
             return Result(
-                "config-podlodka-kinds",
+                "config-local-kinds",
                 False,
                 f"{kind!r} with empty API fields should be valid",
             )
@@ -505,31 +453,22 @@ def test_config_podlodka_kinds_valid() -> Result:
         original = config_mod.config_path
         try:
             config_mod.config_path = lambda: target
-            config_mod.save(
-                PersistedSettings(
-                    model_kind=config_mod.MODEL_KIND_PODLODKA_Q8,
-                    language="ru",
-                )
-            )
-            loaded = config_mod.load()
+            for kind in kinds:
+                config_mod.save(PersistedSettings(model_kind=kind, language="ru"))
+                loaded = config_mod.load()
+                if loaded.model_kind != kind or loaded.language != "ru":
+                    return Result(
+                        "config-local-kinds",
+                        False,
+                        f"roundtrip for {kind!r} lost fields: {loaded!r}",
+                    )
         finally:
             config_mod.config_path = original
-        if loaded.model_kind != config_mod.MODEL_KIND_PODLODKA_Q8:
-            return Result(
-                "config-podlodka-kinds",
-                False,
-                f"roundtrip lost model_kind: {loaded.model_kind!r}",
-            )
-        if loaded.language != "ru":
-            return Result(
-                "config-podlodka-kinds",
-                False,
-                f"roundtrip lost language: {loaded.language!r}",
-            )
     return Result(
-        "config-podlodka-kinds",
+        "config-local-kinds",
         True,
-        "podlodka_fp16/podlodka_q8 valid without API fields; roundtrip preserves them",
+        "gigaam/podlodka_fp16/podlodka_q8 valid without API fields; "
+        "roundtrip preserves them",
     )
 
 
@@ -1103,70 +1042,24 @@ def test_podlodka_fp16_model_load() -> Result:
     occupied the slot before it, so at most one whisper copy is
     resident alongside GigaAM.
     """
-    t0 = time.perf_counter()
-    warm(MODEL_KIND_PODLODKA_FP16)
-    dt = time.perf_counter() - t0
-    if not model_loaded():
-        return Result(
-            "podlodka-fp16-model-load",
-            False,
-            "podlodka fp16 not loaded after warm()",
-        )
-    return Result("podlodka-fp16-model-load", True, f"loaded in {dt:.2f}s")
+    return _check_model_load(
+        "podlodka-fp16-model-load", MODEL_KIND_PODLODKA_FP16, model_loaded
+    )
 
 
 def test_podlodka_fp16_asr_smoke() -> Result:
-    audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.8)
-    t0 = time.perf_counter()
-    text = transcribe(audio, model_kind=MODEL_KIND_PODLODKA_FP16)
-    dt = time.perf_counter() - t0
-    if not isinstance(text, str):
-        return Result(
-            "podlodka-fp16-asr-smoke",
-            False,
-            f"expected str, got {type(text).__name__}",
-        )
-    return Result(
-        "podlodka-fp16-asr-smoke",
-        True,
-        f"podlodka fp16 transcribe returned a {len(text)}-char string in "
-        f"{dt:.2f}s "
-        "(content is not asserted — synthetic signal is not real speech)",
-    )
+    return _check_asr_smoke("podlodka-fp16-asr-smoke", MODEL_KIND_PODLODKA_FP16)
 
 
 def test_podlodka_q8_model_load() -> Result:
     """Podlodka q8 weights download (first run) and load into RAM."""
-    t0 = time.perf_counter()
-    warm(MODEL_KIND_PODLODKA_Q8)
-    dt = time.perf_counter() - t0
-    if not model_loaded():
-        return Result(
-            "podlodka-q8-model-load",
-            False,
-            "podlodka q8 not loaded after warm()",
-        )
-    return Result("podlodka-q8-model-load", True, f"loaded in {dt:.2f}s")
+    return _check_model_load(
+        "podlodka-q8-model-load", MODEL_KIND_PODLODKA_Q8, model_loaded
+    )
 
 
 def test_podlodka_q8_asr_smoke() -> Result:
-    audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.8)
-    t0 = time.perf_counter()
-    text = transcribe(audio, model_kind=MODEL_KIND_PODLODKA_Q8)
-    dt = time.perf_counter() - t0
-    if not isinstance(text, str):
-        return Result(
-            "podlodka-q8-asr-smoke",
-            False,
-            f"expected str, got {type(text).__name__}",
-        )
-    return Result(
-        "podlodka-q8-asr-smoke",
-        True,
-        f"podlodka q8 transcribe returned a {len(text)}-char string in "
-        f"{dt:.2f}s "
-        "(content is not asserted — synthetic signal is not real speech)",
-    )
+    return _check_asr_smoke("podlodka-q8-asr-smoke", MODEL_KIND_PODLODKA_Q8)
 
 
 def test_warmup_failure_retryable() -> Result:
@@ -1405,8 +1298,7 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_config_v1_migration_keeps_language,
         test_config_invalid_endpoint_rejected,
         test_config_missing_api_fields_when_kind_local,
-        test_config_gigaam_kind_valid,
-        test_config_podlodka_kinds_valid,
+        test_config_local_kinds_valid,
         test_audio_to_wav_bytes_round_trip,
         test_api_transcribe_sends_model_id_and_bearer,
         test_api_transcribe_omits_language_when_auto,

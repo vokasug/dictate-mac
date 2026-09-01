@@ -1,4 +1,4 @@
-"""Menu bar UI for dictate-mac — Phase 9 + Phase 15.
+"""Menu bar UI for dictate-mac.
 
 `MenubarApp` is the default entry point (``dictate-mac`` with no
 subcommand). It owns a single ``NSStatusItem`` whose icon is the SF
@@ -143,8 +143,6 @@ CHECK_GLYPH = "\u2713 "
 # State value → human-readable status string for the menu.
 _STATUS_LABELS: dict[State, str] = {
     State.STARTING: "Starting…",
-    State.DOWNLOADING_MODEL: "Downloading whisper model…",
-    State.LOADING_MODEL: "Loading whisper into RAM…",
     State.READY: "Ready — press Right Option to start and stop recording",
     State.RECORDING: "Recording…",
     State.TRANSCRIBING: "Transcribing…",
@@ -152,24 +150,25 @@ _STATUS_LABELS: dict[State, str] = {
     State.ERROR: "Error: see logs",
 }
 
-# Download/load labels for the GigaAM backend — swapped in by the
-# status timer when model_kind == "gigaam".
-_STATUS_LABELS_GIGAAM: dict[State, str] = {
-    State.DOWNLOADING_MODEL: "Downloading GigaAM model…",
-    State.LOADING_MODEL: "Loading GigaAM into RAM…",
-}
-
-# Download/load labels for the two Podlodka variants — swapped in by
-# the status timer while either Podlodka kind is active.
-_STATUS_LABELS_PODLODKA: dict[str, dict[State, str]] = {
-    MODEL_KIND_PODLODKA_FP16: {
-        State.DOWNLOADING_MODEL: "Downloading Podlodka fp16 model…",
-        State.LOADING_MODEL: "Loading Podlodka fp16 into RAM…",
-    },
-    MODEL_KIND_PODLODKA_Q8: {
-        State.DOWNLOADING_MODEL: "Downloading Podlodka q8 model…",
-        State.LOADING_MODEL: "Loading Podlodka q8 into RAM…",
-    },
+# Per-backend (downloading, loading) status strings — the warmup
+# states depend on which model is being fetched.
+_DOWNLOAD_LABELS: dict[str, tuple[str, str]] = {
+    MODEL_KIND_LOCAL: (
+        "Downloading whisper model…",
+        "Loading whisper into RAM…",
+    ),
+    MODEL_KIND_PODLODKA_FP16: (
+        "Downloading Podlodka fp16 model…",
+        "Loading Podlodka fp16 into RAM…",
+    ),
+    MODEL_KIND_PODLODKA_Q8: (
+        "Downloading Podlodka q8 model…",
+        "Loading Podlodka q8 into RAM…",
+    ),
+    MODEL_KIND_GIGAAM: (
+        "Downloading GigaAM model…",
+        "Loading GigaAM into RAM…",
+    ),
 }
 
 
@@ -193,7 +192,6 @@ class MenubarApp(rumps.App):
         self._settings = settings
         self._machine = DictationMachine(settings=settings)
         self._worker: Optional[threading.Thread] = None
-        self._worker_ready = threading.Event()
 
         # ---- status line (disabled) -----------------------------------
         self._status_item = rumps.MenuItem(
@@ -204,7 +202,7 @@ class MenubarApp(rumps.App):
         except Exception:  # noqa: BLE001
             pass
 
-        # ---- recognition language submenu (Phase 15) ------------------
+        # ---- recognition language submenu ------------------------------
         # The parent row is clickable and opens a submenu populated
         # with ``Auto-detect`` + the 99 ISO-639-1 languages that
         # mlx-whisper supports. The currently-selected option carries a
@@ -237,23 +235,23 @@ class MenubarApp(rumps.App):
 
         self._model_local_item = rumps.MenuItem(
             self._format_model_local_title(settings.model_kind),
-            callback=self._select_model_local,
+            callback=self._make_model_callback(MODEL_KIND_LOCAL),
         )
         self._model_podlodka_fp16_item = rumps.MenuItem(
             self._format_model_podlodka_title(
                 MODEL_KIND_PODLODKA_FP16, settings.model_kind
             ),
-            callback=self._select_model_podlodka_fp16,
+            callback=self._make_model_callback(MODEL_KIND_PODLODKA_FP16),
         )
         self._model_podlodka_q8_item = rumps.MenuItem(
             self._format_model_podlodka_title(
                 MODEL_KIND_PODLODKA_Q8, settings.model_kind
             ),
-            callback=self._select_model_podlodka_q8,
+            callback=self._make_model_callback(MODEL_KIND_PODLODKA_Q8),
         )
         self._model_gigaam_item = rumps.MenuItem(
             self._format_model_gigaam_title(settings.model_kind),
-            callback=self._select_model_gigaam,
+            callback=self._make_model_callback(MODEL_KIND_GIGAAM),
         )
         self._model_api_item = rumps.MenuItem(
             self._format_model_api_title(settings.api_endpoint, settings.model_kind),
@@ -542,7 +540,7 @@ class MenubarApp(rumps.App):
             pass
         return None
 
-    # -- recognition language submenu (Phase 15) ------------------------
+    # -- recognition language submenu ----------------------------------
 
     @staticmethod
     def _format_lang_parent_title(code: str) -> str:
@@ -666,49 +664,18 @@ class MenubarApp(rumps.App):
         except Exception as exc:  # noqa: BLE001
             logger.exception("model switch: restart failed: %s", exc)
 
-    def _select_model_local(self, _sender) -> None:
-        """Switch back to the local mlx-whisper model and restart."""
-        if self._settings.model_kind == MODEL_KIND_LOCAL:
-            return
-        logger.info("model switched: %s -> local", self._settings.model_kind)
-        self._settings.model_kind = MODEL_KIND_LOCAL
-        self._persist_settings()
-        self._refresh_model_menu()
-        self._update_language_menu_enabled()
-        self._trigger_model_restart()
+    def _make_model_callback(self, kind: str):
+        def callback(_sender) -> None:
+            self._select_model_kind(kind)
 
-    def _select_model_podlodka_fp16(self, _sender) -> None:
-        """Switch to the local Whisper Podlodka fp16 model and restart."""
-        if self._settings.model_kind == MODEL_KIND_PODLODKA_FP16:
-            return
-        logger.info(
-            "model switched: %s -> podlodka fp16", self._settings.model_kind
-        )
-        self._settings.model_kind = MODEL_KIND_PODLODKA_FP16
-        self._persist_settings()
-        self._refresh_model_menu()
-        self._update_language_menu_enabled()
-        self._trigger_model_restart()
+        return callback
 
-    def _select_model_podlodka_q8(self, _sender) -> None:
-        """Switch to the local Whisper Podlodka q8 model and restart."""
-        if self._settings.model_kind == MODEL_KIND_PODLODKA_Q8:
+    def _select_model_kind(self, kind: str) -> None:
+        """Switch to a local ASR backend and restart so it takes effect."""
+        if self._settings.model_kind == kind:
             return
-        logger.info(
-            "model switched: %s -> podlodka q8", self._settings.model_kind
-        )
-        self._settings.model_kind = MODEL_KIND_PODLODKA_Q8
-        self._persist_settings()
-        self._refresh_model_menu()
-        self._update_language_menu_enabled()
-        self._trigger_model_restart()
-
-    def _select_model_gigaam(self, _sender) -> None:
-        """Switch to the local GigaAM multilingual CTC model and restart."""
-        if self._settings.model_kind == MODEL_KIND_GIGAAM:
-            return
-        logger.info("model switched: %s -> gigaam", self._settings.model_kind)
-        self._settings.model_kind = MODEL_KIND_GIGAAM
+        logger.info("model switched: %s -> %s", self._settings.model_kind, kind)
+        self._settings.model_kind = kind
         self._persist_settings()
         self._refresh_model_menu()
         self._update_language_menu_enabled()
@@ -824,15 +791,12 @@ class MenubarApp(rumps.App):
         if state is not None:
             if state == State.ERROR and self._machine.warmup_failed:
                 label = "Model download failed — press Right Option to retry"
-            elif (
-                self._settings.model_kind == MODEL_KIND_GIGAAM
-                and state in _STATUS_LABELS_GIGAAM
-            ):
-                label = _STATUS_LABELS_GIGAAM[state]
-            elif state in _STATUS_LABELS_PODLODKA.get(
-                self._settings.model_kind, {}
-            ):
-                label = _STATUS_LABELS_PODLODKA[self._settings.model_kind][state]
+            elif state in (State.DOWNLOADING_MODEL, State.LOADING_MODEL):
+                pair = _DOWNLOAD_LABELS.get(self._settings.model_kind)
+                if pair is not None:
+                    label = pair[0 if state == State.DOWNLOADING_MODEL else 1]
+                else:
+                    label = state.value
             else:
                 label = _STATUS_LABELS.get(state, state.value)
             new_title = f"Status: {label}"

@@ -1,7 +1,5 @@
 """Hotkey watcher — Quartz CGEvent tap on Right Option.
 
-Phase 6.
-
 The tap runs in its own CFRunLoop on a dedicated background thread.
 Events are converted to ``HotkeyEvent`` records and pushed into a
 ``queue.Queue`` consumed by the asyncio state machine. The bridge is
@@ -30,11 +28,10 @@ from typing import Optional
 
 logger = logging.getLogger("dictate_mac.hotkey")
 
-# macOS virtual key codes.
-#   0x3A = kVK_Option  (Left Option)
-#   0x3D = kVK_RightOption (Right Option) — the spec-mandated trigger.
+# macOS virtual key codes:
+#   0x3D = kVK_RightOption — the spec-mandated trigger
+#   0x35 = kVK_Escape      — recording cancel key
 K_VK_RIGHT_OPTION = 0x3D
-K_VK_LEFT_OPTION = 0x3A
 K_VK_ESCAPE = 0x35
 K_VK_OPTION_KEYS = (K_VK_RIGHT_OPTION,)
 

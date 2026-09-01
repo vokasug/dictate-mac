@@ -1,7 +1,5 @@
 """Audio capture and silence trimming for dictate-mac.
 
-Phase 2 responsibilities:
-
 * Capture microphone audio at 16 kHz mono float32 via PortAudio
   (``sounddevice.InputStream``).
 * Buffer samples in a thread-safe ``numpy.ndarray`` while recording.
@@ -14,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -28,14 +25,6 @@ DTYPE = "float32"
 BLOCK_SIZE = 4000  # ~250 ms at 16 kHz
 
 
-@dataclass(frozen=True)
-class AudioConfig:
-    samplerate: int = SAMPLE_RATE
-    channels: int = CHANNELS
-    dtype: str = DTYPE
-    blocksize: int = BLOCK_SIZE
-
-
 class Recorder:
     """Captures audio from the default input device into a single buffer.
 
@@ -47,8 +36,7 @@ class Recorder:
         rec.stop() -> np.ndarray  # may be empty if start() was never called
     """
 
-    def __init__(self, config: AudioConfig | None = None) -> None:
-        self._config = config or AudioConfig()
+    def __init__(self) -> None:
         self._stream: Optional[sd.InputStream] = None
         self._chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
@@ -72,12 +60,11 @@ class Recorder:
                 self._chunks.append(indata.copy().reshape(-1))
 
     def _open_stream(self) -> sd.InputStream:
-        cfg = self._config
         stream = sd.InputStream(
-            samplerate=cfg.samplerate,
-            channels=cfg.channels,
-            dtype=cfg.dtype,
-            blocksize=cfg.blocksize,
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype=DTYPE,
+            blocksize=BLOCK_SIZE,
             callback=self._callback,
         )
         stream.start()
@@ -86,12 +73,11 @@ class Recorder:
     def start(self) -> None:
         if self._recording:
             raise RuntimeError("Recorder already started")
-        cfg = self._config
         logger.info(
             "recording started (rate=%d ch=%d blocksize=%d)",
-            cfg.samplerate,
-            cfg.channels,
-            cfg.blocksize,
+            SAMPLE_RATE,
+            CHANNELS,
+            BLOCK_SIZE,
         )
         with self._lock:
             self._chunks.clear()
@@ -134,7 +120,7 @@ class Recorder:
             else:
                 audio = np.concatenate(self._chunks).astype(np.float32)
             self._chunks.clear()
-        duration = audio.size / self._config.samplerate
+        duration = audio.size / SAMPLE_RATE
         logger.info(
             "recording stopped — %d samples (%.2fs, peak=%.3f)",
             audio.size,
@@ -207,11 +193,3 @@ def trim_silence(
         len(timestamps),
     )
     return trimmed
-
-
-def has_speech(audio: np.ndarray) -> bool:
-    """Cheap energy-based pre-check before invoking the VAD model."""
-    if audio.size == 0:
-        return False
-    rms = float(np.sqrt(np.mean(audio**2)))
-    return rms >= 1e-3

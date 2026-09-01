@@ -1,4 +1,4 @@
-"""py2app setup script for dictate-mac (Phase 10).
+"""py2app setup script for dictate-mac.
 
 Builds ``dist/DictateMac.app`` — a macOS bundle that contains every
 Python dependency (mlx + mlx_whisper, silero_vad with its model, sounddevice,
@@ -11,20 +11,15 @@ Run via ``./build.sh`` (handles ``.icns`` generation + python path).
 Notes / sharp edges
 ===================
 
-* ``mlx.metallib`` (~162 MB binary blob) lives at
-  ``site-packages/mlx/lib/mlx.metallib`` and is loaded at runtime via
-  Apple's Metal C++ API. py2app preserves package directory layouts
-  when packages are listed in ``OPTIONS['packages']``, but the ``mlx``
-  namespace package has historically been inconsistent under py2app
-  resource scanning. We list the entire ``mlx/lib`` directory
-  in ``data_files`` explicitly so the metallib lands at
-  ``DictateMac.app/Contents/Resources/data/mlx-lib/mlx.metallib`` —
-  reachable from ``mlx`` via the standard search path py2app sets up.
-* ``silero_vad`` ships its model at ``silero_vad/data/*.jit|.onnx|...
-  safetensors`` and resolves it at runtime via ``importlib.resources``.
-  Listing ``silero_vad.data`` in ``packages`` is enough — py2app
-  bundles non-``.py`` files inside packages automatically and rewires
-  ``importlib.resources.files`` to look inside the bundle.
+* ``mlx.metallib`` (~162 MB binary blob) and the companion dylibs live
+  at ``site-packages/mlx/lib/`` and are loaded at runtime via Apple's
+  Metal C++ API. Listing ``mlx`` in ``OPTIONS['packages']`` mirrors the
+  directory on disk inside the bundle, which is the copy ``mlx.core``
+  resolves via ``importlib.resources``.
+* ``silero_vad`` ships its model at ``silero_vad/data/*.onnx`` and
+  resolves it at runtime via ``importlib.resources``. Listing
+  ``silero_vad.data`` in ``packages`` is enough — py2app bundles
+  non-``.py`` files inside packages automatically.
 * ``sounddevice`` ships a native ``libportaudio.dylib`` as the private
   package ``_sounddevice_data``. ``dlopen()`` cannot load files that
   live inside ``python313.zip``, so the loader fails at startup. We
@@ -45,7 +40,6 @@ from __future__ import annotations
 import re
 import shutil
 import sys
-import warnings
 from pathlib import Path
 
 
@@ -159,119 +153,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 APP = ["src/dictate_mac/__main__.py"]
 ICNS_FILE = PROJECT_ROOT / "assets" / "DictateMac.icns"
-ICONSET_STAGE = PROJECT_ROOT / "assets" / "DictateMac.iconset"
-
-
-def _stage_runtime_files() -> tuple[list[tuple[str, list[str]]], list[str]]:
-    """Stage and return ``(data_files, resources)`` for ``py2app``.
-
-    ``py2app`` interprets ``data_files`` strictly as
-    ``[(bundle_dir, [files_to_copy_there])]`` — directory trees are
-    NOT auto-expanded, so we enumerate every file explicitly. The
-    bundle directory path is relative to ``Contents/Resources``.
-
-    For files that need to be at exact paths inside the bundle (e.g.
-    the Python interpreter has to find ``mlx.metallib``), we use
-    ``resources`` instead — py2app copies each file as-is, preserving
-    the basename.
-
-    Returns
-    -------
-    data_files
-        List of ``(bundle_dir, [abs_paths])`` tuples passed as
-        ``data_files`` to :func:`setup`.
-    resources
-        List of absolute file paths passed as ``resources`` to
-        :func:`setup`. These end up at
-        ``Contents/Resources/<basename>``.
-    """
-    import site
-
-    site_packages = Path(site.getsitepackages()[0])
-
-    bundle_staging = PROJECT_ROOT / "assets" / "_py2app"
-    if bundle_staging.is_symlink() or bundle_staging.exists():
-        if bundle_staging.is_symlink():
-            bundle_staging.unlink()
-        elif bundle_staging.is_dir():
-            shutil.rmtree(bundle_staging)
-        else:
-            bundle_staging.unlink()
-    bundle_staging.mkdir(parents=True, exist_ok=True)
-
-    staged: dict[str, Path] = {}
-
-    pairs = {
-        # Stage the silero-vad model directory so the bundle includes
-        # silero_vad.jit / silero_vad.onnx / silero_vad_*.safetensors.
-        "silero-vad-data": site_packages / "silero_vad" / "data",
-        # mlx.metallib + the small companion .dylibs that the metal
-        # backend dlopens at runtime.
-        "mlx-lib": site_packages / "mlx" / "lib",
-    }
-
-    for stage_name, src in pairs.items():
-        if not src.exists():
-            warnings.warn(
-                f"{src} does not exist; the .app may fail at runtime. "
-                "Did you `uv pip install -e .` in this venv?",
-                stacklevel=2,
-            )
-            continue
-        dst = bundle_staging / stage_name
-        if dst.is_symlink() or dst.exists():
-            if dst.is_symlink():
-                dst.unlink()
-            elif dst.is_dir():
-                shutil.rmtree(dst)
-            else:
-                dst.unlink()
-        try:
-            dst.symlink_to(src.resolve())
-        except OSError:
-            shutil.copytree(src, dst, symlinks=True)
-        files = sorted(p for p in dst.rglob("*") if p.is_file())
-        print(f"  staged {stage_name} ({len(files)} files)")
-        staged[stage_name] = dst
-
-    data_files: list[tuple[str, list[str]]] = []
-    resources: list[str] = []
-
-    # silero-vad: the runtime resolves them via importlib.resources on
-    # the package, so copying them anywhere under Resources/ works as
-    # long as the importlib bootstrap is wired correctly. py2app's
-    # bundle boot adds Resources/ to the package search path.
-    if "silero-vad-data" in staged:
-        silero_files = sorted(
-            str(p) for p in staged["silero-vad-data"].rglob("*") if p.is_file()
-        )
-        # data_files = [(dir_in_bundle, [files])] — each file gets
-        # joined with the dir; basename is preserved by py2app.
-        data_files.append(("data/silero_vad", silero_files))
-        # Same files are also listed as resources, so each keeps a
-        # stable top-level basename for tools that grep the bundle.
-        resources.extend(silero_files)
-
-    # mlx.metallib + libmlx.dylib + libjaccl.dylib: do NOT add them
-    # to ``resources``. py2app already copies them into the on-disk
-    # mirror at ``lib/python3.13/mlx/lib/`` because ``mlx`` is listed
-    # in ``OPTIONS['packages']``. ``mlx.core`` resolves the metallib
-    # path via ``importlib.resources.files('mlx').joinpath('lib/mlx.metallib')``
-    # — that hits the on-disk mirror.
-    #
-    # Adding each ``mlx/lib/*`` file to ``resources`` was an old
-    # belt-and-braces measure for Phase 10 days when py2app's handling
-    # of the namespace package was inconsistent. It cost us a 162 MB
-    # duplicate of ``mlx.metallib`` plus 16 MB of ``libmlx.dylib``
-    # plus 855 KB of ``libjaccl.dylib`` at ``Contents/Resources/`` —
-    # a 179 MB penalty for code that no one calls. Confirmed by
-    # deleting the top-level copies and re-running selftest (5/5
-    # PASS): the on-disk mirror is the one mlx.core uses.
-    #
-    # If a future py2app regression re-breaks this, a quick recovery
-    # is to uncomment the loop below; nothing else depends on it.
-
-    return data_files, resources
 
 
 def _pre_patch_source_venv() -> dict[Path, Path]:
@@ -517,6 +398,24 @@ def _extract_native_runtime_libs(app_dist: Path) -> None:
     extracted: list[str] = []
     removed_prefixes: list[str] = []
 
+    # Additional zip prefixes/suffixes dropped in the same single
+    # rewrite pass: stdlib test/ data, dSYM debug symbols, the heavy
+    # transitive wheels the stubs made unreachable, and every
+    # __pycache__/ (the .pyc headers embed the build machine's absolute
+    # source paths — a developer-home leak in the shipped bundle).
+    zip_strip_prefixes = (
+        "test/",
+        "objc/_objc.cpython-313-darwin.so.dSYM/",
+        "mpmath/",
+        "sympy",
+        "networkx",
+        "numba",
+        "llvmlite",
+        "scipy",
+        "torch",
+    )
+    zip_strip_suffixes = ("/__pycache__/",)
+
     with zipfile.ZipFile(zip_path) as zf:
         for prefix, mode in actions.items():
             members = [n for n in zf.namelist() if n.startswith(prefix)]
@@ -552,26 +451,45 @@ def _extract_native_runtime_libs(app_dist: Path) -> None:
                     out.write(src.read())
                 extracted.append(str(dest))
 
-    # Rewrite the zip without the removed entries — the ZipImporter
-    # would otherwise shadow the on-disk package.
-    if removed_prefixes:
-        tmp_fd, tmp_name = tempfile.mkstemp(
-            dir=str(zip_path.parent), suffix=".tmp.zip"
-        )
-        os.close(tmp_fd)
-        tmp_path = Path(tmp_name)
-        with zipfile.ZipFile(zip_path) as src, zipfile.ZipFile(
-            tmp_path, "w", zipfile.ZIP_DEFLATED
-        ) as dst:
-            for item in src.infolist():
-                if any(
-                    item.filename.startswith(p)
-                    for p in removed_prefixes
-                ):
-                    continue
-                data = src.read(item.filename)
-                dst.writestr(item, data)
-        shutil.move(str(tmp_path), str(zip_path))
+    # Rewrite the zip without the removed/stripped entries — the
+    # ZipImporter would otherwise shadow the on-disk packages, and the
+    # stdlib test/ + __pycache__ entries are dead weight either way.
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        dir=str(zip_path.parent), suffix=".tmp.zip"
+    )
+    os.close(tmp_fd)
+    tmp_path = Path(tmp_name)
+    drop_prefixes = tuple(removed_prefixes) + zip_strip_prefixes
+    stripped: dict[str, int] = {}
+    with zipfile.ZipFile(zip_path) as src, zipfile.ZipFile(
+        tmp_path, "w", zipfile.ZIP_DEFLATED
+    ) as dst:
+        for item in src.infolist():
+            matched = next(
+                (p for p in drop_prefixes if item.filename.startswith(p)),
+                None,
+            )
+            if matched is None:
+                matched = next(
+                    (
+                        s
+                        for s in zip_strip_suffixes
+                        if item.filename.endswith(s)
+                    ),
+                    None,
+                )
+            if matched is not None:
+                stripped[matched] = stripped.get(matched, 0) + 1
+                continue
+            dst.writestr(item, src.read(item.filename))
+    shutil.move(str(tmp_path), str(zip_path))
+    extra = [
+        f"{p} ({n} entries)"
+        for p, n in stripped.items()
+        if p not in removed_prefixes
+    ]
+    if extra:
+        print(f"  stripped from python313.zip: {', '.join(extra)}")
 
     if extracted:
         print(
@@ -998,29 +916,15 @@ def _strip_bundle_junk(app_dist: Path) -> None:
     Targets removed (relative to ``Contents/Resources/lib/python3.13/``
     unless noted otherwise):
 
-    * ``torch/`` sub-packages (``_inductor``, ``_dynamo``,
-      ``distributed``, ``bin``, ``testing``, ``fx``, ``ao``, ``optim``,
-      ``onnx``, ``include``, JIT ``__pycache__``, ``jit``,
-      ``autograd``, ``backends``, ``signal``, ``utils``) plus
-      ``torch-2.13.0.dist-info/`` — only the C-extension entry points
-      (``torch/__init__.py``, ``torch/_C``, ``libtorch_cpu.dylib``)
-      are needed if anything tries to ``import torch``; we strip them
-      entirely because the silero_vad stub no longer touches torch.
+    * ``torch/`` sub-packages plus ``torch-*.dist-info/`` — unreachable
+      once the silero_vad stub no longer touches torch.
 
-    * ``scipy/optimize/`` and the entire ``sympy*/`` tree — pulled by
-      mlx_whisper.timing before the stub broke that chain. The
-      rest of scipy is kept (other code paths may still reference it).
-      If a post-stub import fails because scipy.optimize is missing,
-      remove this strip instead.
+    * ``scipy/`` — unreachable after the ``mlx_whisper.timing`` stub
+      broke the modulegraph chain; the catch-all entry is a guard in
+      case a graph regression ever lands it on disk again.
 
-    * ``numba/`` and its dist-info — same reason as scipy.optimize.
-      ``numba`` ships with the actually-needed llvmlite at runtime,
-      so the two go together.
-
-    * ``llvmlite/`` and its dist-info — pulled in via the numba wheel.
-
-    * ``networkx/`` and its dist-info — pulled in via huggingface_hub
-      / hf_xet for graph operations the daemon never invokes.
+    * ``numba/``, ``llvmlite/``, ``sympy/``, ``networkx/`` and their
+      dist-infos — pulled by torch / hf_xet, never imported at runtime.
 
     * ``onnxruntime/transformers``, ``onnxruntime/quantization``,
       ``onnxruntime/tools``, ``onnxruntime/backend``,
@@ -1030,30 +934,24 @@ def _strip_bundle_junk(app_dist: Path) -> None:
     * All ``*.dSYM/`` directories — Apple-style debug symbols shipped
       by some wheels; not needed at runtime.
 
-    * Python's stdlib ``test/`` directory from ``python313.zip`` —
-      regression test data; never imported by app code.
-
     * Silero-vad model variants we don't use:
       ``silero_vad.jit``, ``silero_vad_16k.safetensors``,
       ``silero_vad_16k_op15.onnx``, ``silero_vad_half.onnx``,
       ``silero_vad_op18_ifless.onnx``. We keep ``silero_vad.onnx``.
 
-    * Top-level duplicates:
-      ``mlx.metallib``, ``libmlx.dylib``, ``libjaccl.dylib`` that
-      py2app also drops into ``Contents/Resources/`` as resources (we
-      do not strip these — both copies are needed because the
-      on-disk mirror at ``lib/python3.13/mlx/lib/`` is what
-      ``mlx.core`` resolves via the DYLD search path).
+    * Top-level duplicates of ``mlx.metallib``, ``libmlx.dylib`` and
+      ``libjaccl.dylib`` that py2app's dylib scan also drops into
+      ``Contents/Resources/`` — the on-disk mirror at
+      ``lib/python3.13/mlx/lib/`` is the copy ``mlx.core`` resolves.
+
+    The python313.zip rewrite (stdlib ``test/``, zip-shadowed packages,
+    ``__pycache__`` entries) lives in ``_extract_native_runtime_libs``
+    so the zip is rewritten exactly once per build.
 
     The post-build step is idempotent: missing targets are silently
     skipped.
     """
     lib_root = app_dist / "Contents" / "Resources" / "lib" / "python3.13"
-    zip_candidates = [
-        app_dist / "Contents" / "Resources" / "lib" / "python3.13" / "python313.zip",
-        app_dist / "Contents" / "Resources" / "lib" / "python313.zip",
-    ]
-    zip_path = next((p for p in zip_candidates if p.exists()), None)
 
     # (lib_root-relative path, description) — directories to remove
     # in-place. None means "doesn't exist; skip silently".
@@ -1088,44 +986,12 @@ def _strip_bundle_junk(app_dist: Path) -> None:
         ("torch/_higher_order_ops", "torch higher-order ops"),
         ("torch/_inductor/codegen", "torch.inductor codegen"),
         ("torch/_inductor/codegen/cuda", "torch.inductor CUDA codegen"),
-        # scipy — Phase 14 audit confirmed the runtime never imports
-        # it (the source-venv pre-patch in main() cuts the graph at
-        # mlx_whisper.timing before py2app scans; verified via
-        # meta_path blocker → 5/5 selftest PASS). Strip every
-        # submodule so a stray reference still resolves cleanly
-        # without dragging the whole 68 MB tree in. The whole
-        # package is then wiped by the `scipy` entry below — listed
-        # per-submodule so the strip report shows the breakdown.
-        ("scipy/optimize", "scipy.optimize (triggers sympy)"),
-        ("scipy/stats", "scipy.stats (distributions, unused)"),
-        ("scipy/sparse", "scipy.sparse (sparse matrices, unused)"),
-        ("scipy/special", "scipy.special (Bessel/gamma, unused)"),
-        ("scipy/linalg", "scipy.linalg (LAPACK wrappers, unused)"),
-        ("scipy/spatial", "scipy.spatial (kd-tree, unused)"),
-        ("scipy/signal", "scipy.signal (signal processing, unused)"),
-        ("scipy/io", "scipy.io (matlab/wavfile, unused)"),
-        ("scipy/interpolate", "scipy.interpolate (unused)"),
-        ("scipy/integrate", "scipy.integrate (ODE, unused)"),
-        ("scipy/ndimage", "scipy.ndimage (image processing, unused)"),
-        ("scipy/fft", "scipy.fft (FFTW bindings, unused)"),
-        ("scipy/fftpack", "scipy.fftpack (legacy FFT, unused)"),
-        ("scipy/cluster", "scipy.cluster (k-means, unused)"),
-        ("scipy/constants", "scipy.constants (physical consts, unused)"),
-        ("scipy/odr", "scipy.odr (orthogonal dist regression, unused)"),
-        ("scipy/datasets", "scipy.datasets (test data)"),
-        ("scipy/differentiate", "scipy.differentiate (finite-diff, unused)"),
-        ("scipy/misc", "scipy.misc (deprecated module)"),
-        ("scipy/_external", "vendored numpy/scipy helpers"),
-        # Catch-all: removes scipy/__init__.py, scipy/__config__.py,
-        # scipy/_cyutility.cpython-313-darwin.so, scipy/_lib/, etc.,
-        # AND any scipy subdirectory not enumerated above.
-        ("scipy", "scipy (catch-all: __init__/__config__/_lib/_external)"),
-        # scipy also ships libgfortran / libquadmath / libgcc_s under
-        # scipy/.dylibs/ — Fortran runtime pulled by scipy.linalg and
-        # scipy.sparse. With the whole tree gone, the dylibs are dead
-        # weight.
-        ("scipy/.dylibs", "scipy Fortran runtime (libgfortran/libquadmath)"),
-        # sympy — gone after scipy.optimize is gone.
+        # scipy — the runtime never imports it (the source-venv
+        # pre-patch in main() cuts the modulegraph chain at
+        # mlx_whisper.timing before py2app scans, so scipy normally
+        # never lands on disk at all). Catch-all guard only.
+        ("scipy", "scipy (unreachable after the timing stub)"),
+        # sympy — gone after scipy is gone.
         # (handled via disk + zip wildcards below)
         # numba — entire package (we never JIT-compile anything).
         ("numba", "numba (llvmlite-backed JIT)"),
@@ -1139,15 +1005,13 @@ def _strip_bundle_junk(app_dist: Path) -> None:
         ("onnxruntime/tools", "onnxruntime.tools"),
         ("onnxruntime/backend", "onnxruntime.backend"),
         ("onnxruntime/datasets", "onnxruntime.datasets"),
-        # numpy — Phase 14 second pass: drop the test directories,
-        # the f2py Fortran wrapper generator, the .pyi typing stubs
-        # (only used by static type-checkers), and the random
-        # _examples/ directory which contains numba/cython/cffi
-        # example kernels we never invoke. Runtime imports nothing
-        # here; selftest still 5/5 PASS after stripping.
-        ("numpy/_core/tests", "numpy._core.tests (3.6 MB pytest data)"),
-        ("numpy/lib/tests", "numpy.lib.tests (852 KB pytest data)"),
-        ("numpy/f2py", "numpy.f2py (1.8 MB Fortran wrapper generator)"),
+        # numpy — drop the test directories, the f2py Fortran wrapper
+        # generator, and the random _examples/ directory which contains
+        # numba/cython/cffi example kernels we never invoke. Runtime
+        # imports nothing here.
+        ("numpy/_core/tests", "numpy._core.tests (pytest data)"),
+        ("numpy/lib/tests", "numpy.lib.tests (pytest data)"),
+        ("numpy/f2py", "numpy.f2py (Fortran wrapper generator)"),
         ("numpy/random/_examples", "numpy random example kernels"),
         # numpy also ships C headers and a static libnpymath.a — both
         # needed only for downstream C extensions building against
@@ -1179,21 +1043,11 @@ def _strip_bundle_junk(app_dist: Path) -> None:
         ("numpy/exceptions", "numpy.exceptions (compatibility alias)"),
         ("numpy/ma", "numpy.ma (masked arrays — not used)"),
         ("numpy/polynomial", "numpy.polynomial (not used)"),
-        # All *.pyi stubs across the bundle — none are needed at runtime.
-        # We can't list every directory individually here because
-        # ``_strip_bundle_junk()`` treats this list as path prefixes;
-        # the catch-all glob ``**/*.pyi`` is handled below in
-        # ``_strip_pyi_files`` (a separate post-build step).
-        # mlx ships a heavy C++ Metal header tree (~3.9 MB) used only
-        # when building C extensions against mlx. Runtime never
-        # touches it; the actual ``mlx.core`` C extension loads via
-        # ``dlopen`` of ``libmlx.dylib`` + ``mlx.metallib``.
-        ("mlx/include", "mlx C++ headers (3.9 MB, build-only)"),
-        # mlx ships a heavy C++ Metal header tree (~3.9 MB) used only
-        # when building C extensions against mlx. Runtime never
-        # touches it; the actual ``mlx.core`` C extension loads via
-        # ``dlopen`` of ``libmlx.dylib`` + ``mlx.metallib``.
-        ("mlx/include", "mlx C++ headers (3.9 MB, build-only)"),
+        # mlx ships a heavy C++ Metal header tree used only when
+        # building C extensions against mlx. Runtime never touches it;
+        # the actual ``mlx.core`` C extension loads via ``dlopen`` of
+        # ``libmlx.dylib`` + ``mlx.metallib``.
+        ("mlx/include", "mlx C++ headers (build-only)"),
         # Quartz — Quartz/CoreGraphics is the only Quartz submodule our
         # code calls (CGEvent tap + CGEventKeyboardSetUnicodeString).
         # DO NOT strip CoreVideo, PDFKit, or ImageKit: their modules
@@ -1201,8 +1055,7 @@ def _strip_bundle_junk(app_dist: Path) -> None:
         # resolution and cause a "circular import" error at
         # ``from Quartz import ...`` time if any of them is missing.
         # The ~530 KB cost is unavoidable.
-        # lib-dynload/objc — keep. Verified during the Phase-14 second
-        # pass: py2app 0.28.x does NOT copy the ``objc/`` package's
+        # lib-dynload/objc — keep. py2app 0.28.x does NOT copy the ``objc/`` package's
         # ``_objc.cpython-313-darwin.so`` into the bundle at all; the
         # only copy of the C extension ends up under
         # ``lib-dynload/objc/_objc.so``. When the bundle's hotkey tap
@@ -1271,12 +1124,10 @@ def _strip_bundle_junk(app_dist: Path) -> None:
     )
 
     # Silero-vad models we don't use. Keep only silero_vad.onnx.
-    # py2app writes the data package in TWO places:
-    # (a) `silero_vad.data/` as a sibling of `silero_vad/` (PEP-style
-    #     namespace data package — the format importlib.resources uses).
-    # (b) `silero_vad/data/` as a subdirectory of the silero_vad package
-    #     (the format the wheel's __init__.py uses for `impresources.files`).
-    # Both must be stripped.
+    # py2app writes the data package in TWO places under lib_root:
+    # (a) `silero_vad.data/` as a sibling of `silero_vad/` (the format
+    #     importlib.resources uses).
+    # (b) `silero_vad/data/` as a subdirectory of the silero_vad package.
     silero_data_dirs = [
         lib_root / "silero_vad.data",
         lib_root / "silero_vad" / "data",
@@ -1289,30 +1140,7 @@ def _strip_bundle_junk(app_dist: Path) -> None:
         "silero_vad_op18_ifless.onnx",
     ]
 
-
-
-    # python313.zip top-level prefixes to drop. We rewrite the zip
-    # to drop these so ZipImporter doesn't shadow the on-disk versions.
-    zip_remove_prefixes = [
-        "test/",
-        "objc/_objc.cpython-313-darwin.so.dSYM/",
-        "mpmath/",
-        "sympy",
-        "networkx",
-        "numba",
-        "llvmlite",
-        "scipy",
-        "torch",
-    ]
-
-    # Same idea as the on-disk __pycache__ sweep above: the .pyc files
-    # inside the zip also carry the developer's build path in their
-    # headers. Match by suffix so we catch every package's __pycache__
-    # (numpy, huggingface_hub, mlx, Foundation, …).
-    zip_remove_suffixes = ("/__pycache__/",)
-
     removed_disk: list[tuple[str, int]] = []  # (label, byte_count)
-    removed_zip: list[str] = []
 
     if not lib_root.is_dir():
         print(f"  expected lib dir missing: {lib_root} — skipping strip")
@@ -1359,21 +1187,10 @@ def _strip_bundle_junk(app_dist: Path) -> None:
                 shutil.rmtree(entry)
                 removed_disk.append((f"dist-info {entry.name}", size))
 
-        # (3) silero_vad model files we don't ship. Four locations
-        #     because py2app mirrored them in different places:
-        #     a) ``silero_vad.data/`` package directory (kept — our
-        #        stub needs ``silero_vad.onnx`` for inference).
-        #     b) ``silero_vad/data/`` subdirectory (kept — the stub's
-        #        fall-back resource lookup uses this format too).
-        #     c) top-level ``Contents/Resources/`` (the ``resources``
-        #        mechanism drops a flat copy here).
-        #     d) ``Contents/Resources/data/silero_vad/`` (the
-        #        ``data_files`` mechanism drops a tree here).
-        for silero_root in (
-            *silero_data_dirs,
-            app_dist / "Contents" / "Resources",
-            app_dist / "Contents" / "Resources" / "data" / "silero_vad",
-        ):
+        # (3) silero_vad model files we don't ship. Two locations
+        #     under lib_root (see silero_data_dirs above); both keep
+        #     ``silero_vad.onnx`` itself, only unused variants go.
+        for silero_root in silero_data_dirs:
             if not silero_root.is_dir():
                 continue
             for name in silero_models_to_remove:
@@ -1383,42 +1200,19 @@ def _strip_bundle_junk(app_dist: Path) -> None:
                     f.unlink()
                     removed_disk.append((f"silero_vad model {name}", size))
 
-        # (3b) Drop any top-level Resources/ duplicates of files that
-        #      already live inside an on-disk Python package. These
-        #      would be the result of accidentally adding wheel files
-        #      to ``resources`` after py2app already wrote them into
-        #      ``lib/python3.13/<pkg>/lib/`` (defense-in-depth for the
-        #      mlx.metallib / libmlx.dylib / libjaccl.dylib triple).
+        # (3b) Drop top-level Resources/ duplicates of the mlx binaries
+        #      that py2app's dylib dependency scan also copies out of
+        #      ``lib/python3.13/mlx/lib/`` (the on-disk package copy is
+        #      the one ``mlx.core`` resolves).
         resources_dir = app_dist / "Contents" / "Resources"
-        duplicates_to_drop = [
-            "mlx.metallib",
-            "libmlx.dylib",
-            "libjaccl.dylib",
-            # silero_vad.onnx is already at
-            # ``lib/python3.13/silero_vad.data/silero_vad.onnx`` (used
-            # at runtime by our stub). The top-level copy and the
-            # ``data/silero_vad/`` mirror copy were dropped here as
-            # belt-and-braces; they cost 4.4 MB.
-            "silero_vad.onnx",
-        ]
-        for name in duplicates_to_drop:
+        for name in ("mlx.metallib", "libmlx.dylib", "libjaccl.dylib"):
             f = resources_dir / name
             if f.exists() and f.is_file():
                 size = f.stat().st_size
                 f.unlink()
                 removed_disk.append((f"top-level {name}", size))
 
-        # (3c) Drop the secondary silero_vad model copy under
-        #      ``Contents/Resources/data/silero_vad/silero_vad.onnx``
-        #      that ``data_files`` mirrored alongside the ``lib/`` copy
-        #      (the lib/ copy is the one our stub reads).
-        secondary_silero = resources_dir / "data" / "silero_vad" / "silero_vad.onnx"
-        if secondary_silero.exists() and secondary_silero.is_file():
-            size = secondary_silero.stat().st_size
-            secondary_silero.unlink()
-            removed_disk.append(("secondary silero_vad.onnx mirror", size))
-
-        # (3d) Drop Resources/include (Python C headers — only needed
+        # (3c) Drop Resources/include (Python C headers — only needed
         #      for compiling C extensions against the bundled Python;
         #      runtime never touches them) and Resources/openssl.ca
         #      (a CA-bundle shipped by py2app's standard recipe; the
@@ -1435,12 +1229,10 @@ def _strip_bundle_junk(app_dist: Path) -> None:
             shutil.rmtree(resources_include)
             removed_disk.append(("Resources/include (Python C headers)", size))
 
-        # (3e) __pycache__/ under Contents/Resources/ (not under
-        #      lib/python3.13/ — that's handled in (1b) above). py2app
-        #      also drops a small number of compiled .pyc files at
-        #      top-level resources paths (e.g. the silero-vad data
-        #      mirror) and these carry the same build-machine path
-        #      leak as the lib/ copies.
+        # (3d) __pycache__/ under Contents/Resources/ (not under
+        #      lib/python3.13/ — that's handled in (1b) above). These
+        #      .pyc files carry the same build-machine path leak as
+        #      the lib/ copies.
         for pycache in resources_dir.rglob("__pycache__"):
             if pycache.is_dir():
                 size = sum(
@@ -1450,17 +1242,6 @@ def _strip_bundle_junk(app_dist: Path) -> None:
                 removed_disk.append(
                     (f"Resources __pycache__ ({pycache.relative_to(resources_dir)})", size)
                 )
-        # And any stragglers — top-level __init__.cpython-313.pyc at
-        # Contents/Resources/ and Contents/Resources/data/silero_vad/
-        # that py2app created when it dropped those packages there.
-        for leftover in (
-            resources_dir / "__init__.cpython-313.pyc",
-            resources_dir / "data" / "silero_vad" / "__init__.cpython-313.pyc",
-        ):
-            if leftover.is_file():
-                size = leftover.stat().st_size
-                leftover.unlink()
-                removed_disk.append((str(leftover.relative_to(app_dist)), size))
 
         resources_openssl = resources_dir / "openssl.ca"
         if resources_openssl.exists() and (
@@ -1476,62 +1257,6 @@ def _strip_bundle_junk(app_dist: Path) -> None:
                 size = resources_openssl.stat().st_size
                 resources_openssl.unlink()
             removed_disk.append(("Resources/openssl.ca (CA-bundle)", size))
-
-        # (4) python313.zip rewrite — drop the stdlib test/ and
-        # transitive deps that we no longer need (the rest of the
-        # zip is preserved, including onnxruntime wheels).
-        if zip_path is not None:
-            try:
-                import tempfile
-                import zipfile
-
-                tmp_fd, tmp_name = tempfile.mkstemp(
-                    dir=str(zip_path.parent),
-                    suffix=".tmp.zip",
-                )
-                import os as _os
-                _os.close(tmp_fd)
-                tmp_path = Path(tmp_name)
-                counts = {p: 0 for p in zip_remove_prefixes}
-                counts_suffix = {s: 0 for s in zip_remove_suffixes}
-                bytes_saved = 0
-                with zipfile.ZipFile(zip_path) as src, zipfile.ZipFile(
-                    tmp_path, "w", zipfile.ZIP_DEFLATED
-                ) as dst:
-                    for item in src.infolist():
-                        prefix_matched = next(
-                            (
-                                p
-                                for p in zip_remove_prefixes
-                                if item.filename.startswith(p)
-                            ),
-                            None,
-                        )
-                        suffix_matched = next(
-                            (
-                                s
-                                for s in zip_remove_suffixes
-                                if item.filename.endswith(s)
-                            ),
-                            None,
-                        )
-                        if prefix_matched is None and suffix_matched is None:
-                            dst.writestr(item, src.read(item.filename))
-                        elif prefix_matched is not None:
-                            counts[prefix_matched] += 1
-                            bytes_saved += item.file_size
-                        else:
-                            counts_suffix[suffix_matched] += 1
-                            bytes_saved += item.file_size
-                shutil.move(str(tmp_path), str(zip_path))
-                for prefix, count in counts.items():
-                    if count:
-                        removed_zip.append(f"{prefix} ({count} entries)")
-                for suffix, count in counts_suffix.items():
-                    if count:
-                        removed_zip.append(f"*{suffix} ({count} entries)")
-            except Exception as exc:  # noqa: BLE001
-                print(f"  WARNING: zip rewrite failed: {exc}")
 
         # (5) *.dSYM/ anywhere under lib/. Debug symbols are useless
         #     at runtime and add hundreds of KBs each.
@@ -1591,10 +1316,6 @@ def _strip_bundle_junk(app_dist: Path) -> None:
             print(f"    {label:<60}  {size / 1e6:7.2f} MB")
         if len(removed_disk) > 10:
             print(f"    ... and {len(removed_disk) - 10} more")
-    if removed_zip:
-        print(
-            f"  stripped from python313.zip: {', '.join(removed_zip)}"
-        )
 
 
 def main() -> None:
@@ -1610,11 +1331,8 @@ def main() -> None:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     from dictate_mac import __version__ as APP_VERSION
 
-    data_files, resources = _stage_runtime_files()
-
     OPTIONS = {
         "argv_emulation": False,
-        "resources": resources,
         "iconfile": str(ICNS_FILE),
         "plist": {
             "CFBundleName": "DictateMac",
@@ -1660,13 +1378,9 @@ def main() -> None:
             # ssl can only load CA bundles from the filesystem. See
             # the matching zip-removal in _extract_native_runtime_libs.
             "certifi",
-            # numpy and scipy are kept as directories because the
-            # zip-import path breaks their relative-import story.
-            # Post-build, scipy.optimize is stripped (it transitively
-            # pulls sympy); the rest of scipy is preserved for any
-            # edge-case import that still lands on it.
+            # numpy is kept as a directory because the zip-import path
+            # breaks its relative-import story.
             "numpy",
-            "scipy",
         ],
         "includes": [
             "numpy",
@@ -1682,45 +1396,23 @@ def main() -> None:
             "ctypes",
             "objc",
         ],
+        # Heavy packages actually present in the build venv (silero-vad
+        # pulls torch/numba/scipy transitively) that the bundle never
+        # imports — the stubs break the modulegraph chain. Anything
+        # not installed in the venv needs no exclude entry at all.
         "excludes": [
             "tkinter",
-            "PyQt5",
-            "PyQt6",
-            "PySide2",
-            "PySide6",
-            "IPython",
-            "notebook",
-            "jupyter",
-            "matplotlib",
-            "pytest",
             "setuptools",
             "pip",
             "wheel",
-            "_pytest",
-            "sphinx",
-            "mkl",
-            # Heavy ML frameworks we never use. The silero_vad stub
-            # removes the only reason modulegraph would chase torch;
-            # listing them here gives py2app a strong signal to skip
-            # the scan entirely. _strip_bundle_junk() re-removes any
-            # straggler sub-trees that the broader packages list
-            # accidentally dragged in.
             "torch",
-            "torchvision",
             "torchaudio",
             "numba",
             "llvmlite",
             "sympy",
             "networkx",
-            "pandas",
-            "transformers",
-            "datasets",
-            "PIL",
-            "sklearn",
-            "skimage",
-            "cv2",
-            "tornado",
-            "zmq",
+            "mpmath",
+            "functorch",
         ],
         "strip": True,
         "optimize": 1,
@@ -1741,7 +1433,6 @@ def main() -> None:
         setup(
             app=APP,
             name="DictateMac",
-            data_files=data_files,
             options={"py2app": OPTIONS, "build_py": {"optimize": 1}},
         )
     finally:
