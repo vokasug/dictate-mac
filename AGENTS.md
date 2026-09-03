@@ -67,7 +67,7 @@ backends selected at runtime:
 - Audio is captured at 16 kHz mono, trimmed with `silero-vad`, and
   transcribed with one of:
   - **Local Whisper** — `mlx-whisper` (`mlx-community/whisper-large-v3-turbo`)
-    running in-process. ~1.6 GB resident in RAM.
+    running in-process. ~1.8–2.0 GB resident in RAM (~1.6 GB of weights).
   - **Local Whisper Podlodka fp16 / q8** —
     `evilfreelancer/whisper-podlodka-turbo-MLX` (pinned revision),
     an MLX conversion of the Whisper-Podlodka-Turbo fine-tune
@@ -126,7 +126,8 @@ dictate-mac/
 │       │   └── utils_vad.py
 │       ├── mlx_whisper/
 │       │   └── timing.py   # raises — we never call add_word_timestamps
-│       └── torchaudio/     # Python stub used by the silero-vad path
+│       (the torchaudio stub is written inline by setup.py's
+│        _install_torchaudio_stub, not stored here)
 ├── src/dictate_mac/
 │   ├── __init__.py         # __version__ (currently 0.6.2)
 │   ├── __main__.py         # python -m dictate_mac
@@ -144,7 +145,7 @@ dictate-mac/
 ├── tests/
 │   ├── inject_option.py    # synthetic Right Option injector
 │   └── dialog_smoke.py     # API dialog standalone smoke test
-└── dist/DictateMac.app     # build artifact (~285 MB)
+└── dist/DictateMac.app     # build artifact (~284 MB)
 ```
 
 ## 3. Module map
@@ -154,13 +155,13 @@ reach across module boundaries — use the public surface listed.
 
 | Module                    | Owns                                                          | Public surface                                                        |
 | ------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `cli.py`                  | argparse, subcommand dispatch, app-bundle detection           | `main`, `cmd_daemon`, `cmd_warmup`, `cmd_selftest`, `cmd_menubar`      |
+| `cli.py`                  | argparse, subcommand dispatch, app-bundle detection           | `main`, `cmd_daemon`, `cmd_warmup`, `cmd_menubar`                     |
 | `audio.py`                | mic capture + VAD trimming                                    | `Recorder`, `trim_silence`                                              |
 | `transcriber.py`          | ASR backends: local mlx-whisper (stock + Podlodka fp16/q8) + GigaAM CTC + OpenAI-compatible API | `transcribe(audio, language, *, model_kind, api_*)`, `check_api_model_available`, `ensure_warm_async`, `warm`, `is_model_cached`, `model_loaded`, `gigaam_loaded`, `MODEL_REPO`, `PODLODKA_REPO`, `PODLODKA_REVISION`, `PODLODKA_VARIANTS`, `_audio_to_wav_bytes` |
 | `typer.py`                | keystroke injection into focused window                       | `type_text(text, backend, per_char_delay_ms)`, `type_text_quartz`, `type_text_osascript` |
 | `hotkey.py`               | global Right Option watcher (+ Esc cancel)                    | `HotkeyWatcher(output_queue)`, `HotkeyEdge`, `HotkeyEvent`              |
 | `state.py`                | orchestrates the loop: warm → arm → record → transcribe → type | `DictationMachine`, `Settings`, `State`, `SOUND_START`, `SOUND_END`, `_save_last_recording` |
-| `config.py`               | persisted settings (language + ASR backend + API credentials) | `AUTO`, `SUPPORTED_ISO_639_1`, `MODEL_KINDS`, `MODEL_KIND_LOCAL`, `MODEL_KIND_GIGAAM`, `MODEL_KIND_API`, `menu_items`, `display_name`, `load`, `save`, `PersistedSettings`, `normalize_endpoint`, `endpoint_scheme_ok`, `detect_system_primary_language` |
+| `config.py`               | persisted settings (language + ASR backend + API credentials) | `AUTO`, `SUPPORTED_ISO_639_1`, `MODEL_KINDS`, `MODEL_KIND_LOCAL`, `MODEL_KIND_PODLODKA_FP16`, `MODEL_KIND_PODLODKA_Q8`, `MODEL_KIND_GIGAAM`, `MODEL_KIND_API`, `menu_items`, `display_name`, `load`, `save`, `PersistedSettings`, `normalize_endpoint`, `endpoint_scheme_ok`, `detect_system_primary_language` |
 | `menubar.py`              | NSStatusItem + Model/language submenus                        | `run_menubar(settings)`, `MenubarApp`                                   |
 | `model_settings_dialog.py`| API credentials modal — 3 fields, GET /models check on OK     | `ApiModelSettingsDialog`, `ApiModelSettingsResult`                      |
 | `logutils.py`             | stderr vs `~/Library/Logs/dictate-mac/dictate-mac.log`        | `configure_logging`, `is_app_bundle`, `LOG_FILE`, `LOG_FORMAT`, `LAST_RECORDING_WAV` |
@@ -224,6 +225,8 @@ System sounds (best-effort via detached `afplay` threads):
 These are the design choices that shape the code. Touch them only if
 the reason is still valid after you check the source.
 
+### MLX runtime and Whisper decode
+
 - **mlx-whisper large-v3-turbo, MLX variant.** `mlx-community/whisper-
   large-v3-turbo` is the MLX re-serialisation of `openai/whisper-large-
   v3-turbo` — same weights, different runtime. ~1.6 GB in RAM (fp16).
@@ -263,7 +266,52 @@ the reason is still valid after you check the source.
   capitalized sample sentence covering the top 30 languages by
   number of speakers, sent only when the user pinned one of those
   languages in the menu (never for `auto`).
-- **GigaAM multilingual CTC as the third backend.** When
+
+### Podlodka variants (fp16 / q8)
+
+- **Whisper-Podlodka-Turbo ships as two selectable quantizations,
+  both through the stock whisper code path.** The HF repo
+  `evilfreelancer/whisper-podlodka-turbo-MLX` holds one subfolder per
+  quantization (`fp16/`, `q8/`, `q4/`); each is a complete
+  mlx-whisper model directory. `PODLODKA_VARIANTS` maps the kinds
+  `podlodka_fp16` / `podlodka_q8` to their subfolders; `q4` exists in
+  the repo but is deliberately not exposed (4-bit risks eroding
+  exactly what the fine-tune adds — Russian punctuation and
+  capitalisation). Design points:
+  - The revision is pinned (`PODLODKA_REVISION`) so upstream
+    re-uploads can never silently change the weights, mirroring how
+    GigaAM pins its artifact revision.
+  - Downloads use `snapshot_download(allow_patterns=["<variant>/
+    config.json", "<variant>/weights.safetensors"])`, so only the
+    selected variant lands in the HF cache — never the other
+    quantization or the repo's test WAVs.
+  - The cache check cannot rely on
+    `snapshot_download(local_files_only=True)` alone: it resolves
+    against any locally-present snapshot of the *repo*, even when
+    this particular variant was never fetched (all variants share
+    one cache entry). `_podlodka_model_cached` therefore verifies
+    both files exist under `<snapshot>/<variant>/`, and
+    `_podlodka_model_path` falls back to a real download pass when
+    `weights.safetensors` is missing.
+  - Quantized variants need no loader changes: mlx-whisper's own
+    `load_models.load_model` pops the `quantization` key from each
+    variant's `config.json` and calls `nn.quantize` before loading
+    weights, so `ModelHolder.get_model(path, mx.float16)` serves
+    fp16 and q8 alike — the dtype argument only shapes the
+    un-quantized layers.
+  - Transcription is the stock `_transcribe_local_mlx` with a
+    `model_kind` parameter: same decode options, same
+    `WHISPER_INITIAL_PROMPTS`, same `mx.clear_cache()` discipline.
+  - `_load_model` tracks `_model_kind_loaded` and releases the
+    previous whisper-family model before swapping kinds (including
+    mlx-whisper's `ModelHolder` class-level reference — otherwise
+    two multi-GB copies sit in RAM). Irrelevant in normal operation
+    (a backend switch restarts the process), but the selftest loads
+    several whisper-family models back to back in one process.
+
+### GigaAM
+
+- **GigaAM multilingual CTC as an alternative local backend.** When
   `model_kind="gigaam"`, transcription runs through the
   `gigaam-multilingual-mlx` package (FP16 artifact,
   `ai-babai/gigaam-multilingual-mlx`, pinned revision read from the
@@ -304,45 +352,6 @@ the reason is still valid after you check the source.
   occasionally be emitted by both windows (rare duplicated word).
   Shorter buffers stay one-shot, so normal dictation latency is
   unchanged.
-- **Whisper-Podlodka-Turbo ships as two selectable quantizations,
-  both through the stock whisper code path.** The HF repo
-  `evilfreelancer/whisper-podlodka-turbo-MLX` holds one subfolder per
-  quantization (`fp16/`, `q8/`, `q4/`); each is a complete
-  mlx-whisper model directory. `PODLODKA_VARIANTS` maps the kinds
-  `podlodka_fp16` / `podlodka_q8` to their subfolders; `q4` exists in
-  the repo but is deliberately not exposed (4-bit risks eroding
-  exactly what the fine-tune adds — Russian punctuation and
-  capitalisation). Design points:
-  - The revision is pinned (`PODLODKA_REVISION`) so upstream
-    re-uploads can never silently change the weights, mirroring how
-    GigaAM pins its artifact revision.
-  - Downloads use `snapshot_download(allow_patterns=["<variant>/
-    config.json", "<variant>/weights.safetensors"])`, so only the
-    selected variant lands in the HF cache — never the other
-    quantization or the repo's test WAVs.
-  - The cache check cannot rely on
-    `snapshot_download(local_files_only=True)` alone: it resolves
-    against any locally-present snapshot of the *repo*, even when
-    this particular variant was never fetched (all variants share
-    one cache entry). `_podlodka_model_cached` therefore verifies
-    both files exist under `<snapshot>/<variant>/`, and
-    `_podlodka_model_path` falls back to a real download pass when
-    `weights.safetensors` is missing.
-  - Quantized variants need no loader changes: mlx-whisper's own
-    `load_models.load_model` pops the `quantization` key from each
-    variant's `config.json` and calls `nn.quantize` before loading
-    weights, so `ModelHolder.get_model(path, mx.float16)` serves
-    fp16 and q8 alike — the dtype argument only shapes the
-    un-quantized layers.
-  - Transcription is the stock `_transcribe_local_mlx` with a
-    `model_kind` parameter: same decode options, same
-    `WHISPER_INITIAL_PROMPTS`, same `mx.clear_cache()` discipline.
-  - `_load_model` tracks `_model_kind_loaded` and releases the
-    previous whisper-family model before swapping kinds (including
-    mlx-whisper's `ModelHolder` class-level reference — otherwise
-    two multi-GB copies sit in RAM). Irrelevant in normal operation
-    (a backend switch restarts the process), but the selftest loads
-    several whisper-family models back to back in one process.
 - **The bundle process can start with an ASCII locale, breaking the
   GigaAM artifact load.** The py2app launcher environment may leave
   the process on a POSIX/C locale, so `Path.read_text()` defaults to
@@ -353,6 +362,9 @@ the reason is still valid after you check the source.
   `locale.getencoding()` isn't UTF-8 — `open()` re-queries the
   locale on every call, so no interpreter restart is needed. No-op
   in the venv.
+
+### API backend and credentials dialog
+
 - **OpenAI-compatible API backend as an alternative to the local
   model.** When `model_kind=api`, the same trimmed audio buffer is
   encoded as 16 kHz mono PCM WAV (`_audio_to_wav_bytes`) and POSTed to
@@ -375,16 +387,37 @@ the reason is still valid after you check the source.
   toggle.** Showing / hiding the key is implemented by stacking an
   `NSSecureTextField` and a plain `NSTextField` on top of each other
   and toggling `setHidden_` rather than by swapping the cell type.
-  Earlier attempts to swap the cell between `NSSecureTextFieldCell`
-  and `NSTextFieldCell` — the documented Cocoa pattern — failed on
-  this PyObjC version because the secure field editor kept painting
-  bullets on top of the new cell even after `abortEditing`. The
+  Cell-type swapping (the documented Cocoa pattern) is unreliable on
+  this PyObjC version: the secure field editor keeps painting bullets
+  on top of the new cell even after `abortEditing`. The
   two-field approach dodges that class of bug entirely: each cell
   type uses its own native echo behaviour. A Python attribute
   (`_key_value`) holds the plaintext; an `NSControl` delegate on
   both fields keeps them in sync via `controlTextDidChange:`. The
   show/hide eye button toggles visibility and re-copies `_key_value`
   into the now-visible field.
+- **Hidden Edit menu for ⌘C / ⌘V in modal text fields.** A menubar
+  app is `LSUIElement=True` and has no visible menu bar, so without
+  intervention `⌘V` in a modal text field triggers the system
+  error beep — there's no menu item to absorb the key equivalent
+  and route it through the responder chain. The dialog installs a
+  hidden Edit menu (`Cut`, `Copy`, `Paste`, `Delete`, `Select All`)
+  on `NSApp.mainMenu()` on first show. The menu is never displayed
+  but its items register the standard `cut:` / `copy:` / `paste:` /
+  `delete:` / `selectAll:` selectors, which routes the key
+  equivalents through to the first responder (the field editor).
+  Idempotent on every dialog open.
+- **API key never logged, never serialised into error messages.**
+  `transcriber.check_api_model_available`, `_transcribe_api`, the
+  modal OK handler, and `state._stop_and_process` keep the key out of
+  every `RuntimeError` they raise and out of every `logger.warning`
+  call. The dialog's error label shows only the category of failure
+  and the endpoint — never the key. Selftest mock-fakes the API
+  key as `SECRET_KEY_DO_NOT_LEAK` and explicitly asserts the
+  substring never appears in any captured error.
+
+### Backend switching and warmup
+
 - **Model switching requires an app restart.** Selecting a different
   row in the Model menu (Local Whisper / Local Whisper Podlodka
   fp16 / Local Whisper Podlodka q8 / Local GigaAM / API) writes
@@ -408,6 +441,9 @@ the reason is still valid after you check the source.
   the hotkey-permission ERROR remains terminal. Dead-tap detection
   keys off `_watcher_started` rather than the armed states so it
   also fires inside the retryable ERROR state.
+
+### Packaging and app shell
+
 - **certifi ships as an on-disk package, and `SSL_CERT_FILE` is
   repaired twice.** `ssl.create_default_context(cafile=...)` reads
   from the filesystem only; a zip-bundled certifi makes
@@ -424,18 +460,17 @@ the reason is still valid after you check the source.
   re-points any still-broken variable at `certifi.where()`. The
   `ssl-certifi` selftest check covers all three paths (env vars,
   `certifi.where()`, `httpx.Client()` construction).
-- **Hidden Edit menu for ⌘C / ⌘V in modal text fields.** A menubar
-  app is `LSUIElement=True` and has no visible menu bar, so without
-  intervention `⌘V` in a modal text field triggers the system
-  error beep — there's no menu item to absorb the key equivalent
-  and route it through the responder chain. The dialog installs a
-  hidden Edit menu (`Cut`, `Copy`, `Paste`, `Delete`, `Select All`)
-  on `NSApp.mainMenu()` on first show. The menu is never displayed
-  but its items register the standard `cut:` / `copy:` / `paste:` /
-  `delete:` / `selectAll:` selectors, which routes the key
-  equivalents through to the first responder (the field editor).
-  Idempotent on every dialog open.
-- **Quartz CGEvent Unicode over `pynput`.** Direct call to
+- **Rumps menu bar + py2app `.app`.** `rumps` is a PyObjC wrapper
+  around `NSStatusItem` — small, idiomatic, runs `NSApp` on the main
+  thread. `py2app` produces a real `.app` bundle with
+  `CFBundleIdentifier=com.local.dictate-mac`, `LSUIElement=True`,
+  and `NSMicrophoneUsageDescription`, so TCC grants (Microphone,
+  Accessibility, Input Monitoring) attach to the bundle id rather
+  than to Terminal.
+
+### Hotkey, typing and audio capture
+
+- **Quartz CGEvent Unicode over `pynput`.** A direct call to
   `CGEventKeyboardSetUnicodeString` is the canonical macOS path for
   Unicode typing and forwards predictably through the Citrix ICA
   channel. `pynput` is reported to drop Cyrillic in some
@@ -478,6 +513,9 @@ the reason is still valid after you check the source.
   pointers. The signature must be `(proxy, type, event, userInfo)`
   with four arguments — omit the fourth and `TypeError` kills the
   callback while the CFRunLoop keeps spinning.
+
+### Settings persistence
+
 - **Persisted settings in JSON, XDG-style.** Six storage options were
   considered (NSUserDefaults, Library/Application Support, ~/.config,
   TOML, env var, hybrid); `~/.config/dictate-mac/config.json` was
@@ -496,21 +534,6 @@ the reason is still valid after you check the source.
   ~0.3 s switch cost; the model itself is not reloaded. (The
   `model_kind` switch is NOT hot — see "Model switching requires an
   app restart" above.)
-- **Rumps menu bar + py2app `.app`.** `rumps` is a PyObjC wrapper
-  around `NSStatusItem` — small, idiomatic, runs `NSApp` on the main
-  thread. `py2app` produces a real `.app` bundle with
-  `CFBundleIdentifier=com.local.dictate-mac`, `LSUIElement=True`,
-  and `NSMicrophoneUsageDescription`, so TCC grants (Microphone,
-  Accessibility, Input Monitoring) attach to the bundle id rather
-  than to Terminal.
-- **API key never logged, never serialised into error messages.**
-  `transcriber.check_api_model_available`, `_transcribe_api`, the
-  modal OK handler, and `state._stop_and_process` keep the key out of
-  every `RuntimeError` they raise and out of every `logger.warning`
-  call. The dialog's error label shows only the category of failure
-  and the endpoint — never the key. Selftest mock-fakes the API
-  key as `SECRET_KEY_DO_NOT_LEAK` and explicitly asserts the
-  substring never appears in any captured error.
 
 ## 6. Build pipeline (`./build.sh`)
 
@@ -524,7 +547,14 @@ the reason is still valid after you check the source.
    This stops py2app's `modulegraph` from chasing scipy/numba/torch
    through upstream `from scipy import signal` /
    `import torch` at the top of those modules.
-4. Run `setup.py py2app`.
+4. Run `setup.py py2app`. Importing `setup.py` first applies three
+   interpreter-level patches: `_install_pyproject_compat` (lets
+   setuptools read `pyproject.toml` metadata),
+   `_noop_dependencies`, and `_patch_py2app_for_ns_packages` —
+   py2app 0.28 resolves package paths via `imp.find_module`, which
+   raises `ImportError` for PEP 420 namespace packages like `mlx`
+   (no `__init__.py`); the patch falls back to an
+   `importlib`-derived path.
 5. Restore the source venv in a `finally:` block (always, even on
    build failure).
 6. Run post-build steps on `dist/DictateMac.app`:
@@ -595,7 +625,7 @@ the reason is still valid after you check the source.
       caches is free at runtime.
 
 Bundle id: `com.local.dictate-mac`. No code signing, no notarisation.
-Final size: ~285 MB on disk.
+Final size: ~284 MB on disk.
 
 `gigaam_multilingual_mlx` is listed in `OPTIONS['packages']` (mirrored
 on disk) and its zip entries are removed in
@@ -643,11 +673,11 @@ is never imported at runtime and is excluded from the bundle.)
 
 `dictate-mac` (no subcommand) launches the menu bar app.
 
-| Subcommand | Purpose                                                |
-| ---------- | ------------------------------------------------------ |
-| `daemon`   | Plain CLI daemon (no menu bar). Same code path.        |
-| `warmup`   | Download + load model, optional mic sanity test.       |
-| `selftest` | Headless smoke checks; `--no-mic` skips the mic step.  |
+| Subcommand | Purpose                                                       |
+| ---------- | ------------------------------------------------------------- |
+| `daemon`   | Plain CLI daemon (no menu bar). Same code path.               |
+| `warmup`   | Download + load model, optional mic sanity test (`--skip-mic-test` skips it). |
+| `selftest` | Headless smoke checks; `--no-mic` skips the mic step, `--language` sets the ASR smoke language. |
 
 Common flags (must come before OR after the subcommand): `--quiet`,
 `--log-level` (DEBUG|INFO|WARNING|ERROR|CRITICAL), `--output`
@@ -799,60 +829,23 @@ would block forever in a headless context).
   and require all-PASS before handing it to a user (see § 6).
 - Don't reach for `pynput` — use raw Quartz `CGEvent`.
 - Don't use the clipboard — Citrix blocks it.
-- Don't add a `README.md` "What changed" or "Changelog" section.
-  Don't add a "Phase N" marker or a numbered history to
-  `AGENTS.md`. Either document the **current** reality or strip
-  the section.
-- All prose in `AGENTS.md` and `README.md` is English. No
-  Russian, German, Spanish, or other scripts in prose, comments,
-  or quoted test utterances.
 - Reference code with `file_path:line_number` when pointing an
   agent at it.
-- API credentials (endpoints, bearer tokens, model ids) **must
-  never appear as real values** in source, comments, AGENTS.md,
-  README.md, or test fixtures — even in examples and even when
-  pulled from a public tool you happen to know. Use generic
-  placeholders (`<endpoint>`, `<api-key>`, `<model-id>`,
-  `https://<host>/v1`, etc.) instead. Selftest fakes the key as
-  the explicit string `SECRET_KEY_DO_NOT_LEAK` and asserts it
-  never surfaces in any error message.
+- Real credentials, endpoints and personal data never go into
+  tracked files or docs — placeholders only (see the Documentation
+  rule above). Test fixtures fake the key as
+  `SECRET_KEY_DO_NOT_LEAK` (see § 5, "API key never logged").
 
 ## 12. Known limitations
 
-- RAM held permanently after first warmup **in a local mode**:
-  ~1.6 GB for Whisper (steady-state footprint ~1.8-2.0 GB; transient
-  decode buffers peak briefly during recognition and are returned to
-  the OS via `mx.clear_cache()` right after), ~1.8 GB for Podlodka
-  fp16, ~1.1 GB for Podlodka q8, ~1.4 GB for GigaAM.
-  In API mode the warmup thread is skipped entirely and
-  the local model is never loaded; switching from local to API via
-  the menu triggers a restart that drops the previously-loaded
-  weights.
-- GigaAM output is lowercase without punctuation (greedy CTC), and
-  the model supports only Russian, English, Kazakh, Kyrgyz and
-  Uzbek — pick Whisper, Podlodka or API for other languages or for
-  punctuation-rich output.
-- The Podlodka fine-tune is strongest on Russian and English; on
-  other languages stock Whisper (or the API backend) remains the
-  better choice.
+User-facing limitations — per-backend RAM footprints, GigaAM's five
+languages and lowercase no-punctuation output, the Podlodka ru/en
+focus, manual TCC grants, the unsigned unnotarised bundle,
+restart-on-backend-switch, Citrix Unicode input, Python 3.13-only —
+are documented in README § "Uninstall & known limitations"; the
+rationale for each lives in § 5 above. Dev-only:
+
 - The bundled `.app` cannot transcode audio files: the
   `silero_vad.read_audio` and `torchaudio.load` paths raise
   `RuntimeError`. All production audio flows through
   PortAudio → `numpy.ndarray` → silero-vad → ASR backend.
-- Citrix Viewer needs **Send Unicode keyboard input** enabled
-  (modern default). If Cyrillic drops, switch to
-  `--output=osascript`.
-- TCC permissions (Microphone, Accessibility, Input Monitoring)
-  must be granted manually. Bundle id: `com.local.dictate-mac`.
-  They survive re-installs of the same `.app`, but moving to
-  another Mac or another bundle id requires a fresh grant.
-- The `.app` is unsigned, ad-hoc, not notarised. Gatekeeper may
-  prompt on first launch — right-click → Open.
-- If Input Monitoring was not granted before launch, the
-  CGEventTap stays disabled. Re-enable requires Quit + reopen.
-- No code signing, no LaunchAgent, no auto-start at login.
-- Switching the ASR backend (Local ↔ API) requires an app
-  restart. The menu click triggers the restart automatically; the
-  user is dropped back into the freshly-launched bundle with the
-  new config active.
-- Python 3.13.x only; no 3.14 wheel for `mlx`.

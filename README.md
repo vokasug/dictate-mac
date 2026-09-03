@@ -3,7 +3,7 @@
 Voice dictation for macOS with **five ASR backends** selectable at runtime:
 
 - **Local Whisper** — `mlx-community/whisper-large-v3-turbo` runs
-  in-process via MLX on Apple Silicon (~1.6 GB RAM, works fully
+  in-process via MLX on Apple Silicon (~1.8 GB RAM, works fully
   offline, 100 languages).
 - **Local Whisper Podlodka fp16 / q8** —
   `evilfreelancer/whisper-podlodka-turbo-MLX`, a
@@ -61,7 +61,7 @@ To *run* dictate-mac:
 - **macOS 13 Ventura** or newer
 - **8 GB RAM** or more
 - Any working microphone (the built-in one is fine)
-- ~285 MB for the `.app` itself, plus an optional download for the
+- ~284 MB for the `.app` itself, plus an optional download for the
   selected local backend's weights (~1.5 GB Whisper, ~1.5 GB Podlodka
   fp16, ~0.8 GB Podlodka q8, or ~1.2 GB GigaAM; downloaded on first
   launch of the matching local mode; **API** mode needs no extra disk)
@@ -84,14 +84,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.6.1-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.6.1-macos.zip)
+[`DictateMac-v0.6.2-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.6.2-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
 Compressed download is ~93 MB; the extracted `.app` is ~284 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.6.1-macos.zip
+shasum -a 256 DictateMac-v0.6.2-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -100,7 +100,7 @@ shasum -a 256 DictateMac-v0.6.1-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.6.1-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.6.2-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -114,9 +114,10 @@ open /Applications/DictateMac.app
 ### 3. Grant the three permissions
 
 macOS prompts for *Microphone* the very first time you press Right
-Option; the menu bar stays on `Status: Error: see logs` until you
-also grant *Accessibility* and *Input Monitoring* by hand in
-**System Settings → Privacy & Security**. See the
+Option; *Accessibility* and *Input Monitoring* are granted by hand in
+**System Settings → Privacy & Security**. If Input Monitoring is
+missing at launch, the daemon logs an error and exits — grant it and
+reopen the app. See the
 [Permissions row in the menu](#the-menu-bar) for one-click shortcuts
 to each pane, and [Troubleshooting](#verifying--troubleshooting) for
 fixes if any are still missing.
@@ -148,17 +149,16 @@ To use an external service instead:
    daemon restarts so the API backend takes effect at boot.
 
 To switch back, pick **Local Whisper** in the same menu. See
-[Choosing your backend](#choosing-your-backend-whisper-vs-gigaam-vs-api)
+[Choosing your backend](#choosing-your-backend-whisper-vs-podlodka-vs-gigaam-vs-api)
 for full details on validation, error messages, and the config file.
 
 ### 5. Pick the language
 
 Click the menu bar icon → **Recognition language** → *Auto-detect*
 or any of the 100 ISO-639-1 codes. The choice persists and applies
-to the next recording (no model reload, applies to the Whisper and
-API backends). For the API backend the chosen language is also
-forwarded as a `language` form field on every request, so the gateway
-skips its own detection. In **GigaAM** mode this menu is disabled —
+to the next recording — no model reload. The API backend also
+forwards it per request (see [API](#api)). In **GigaAM** mode this
+menu is disabled —
 the model auto-detects its five supported languages on its own.
 
 ### 6. Use
@@ -320,10 +320,8 @@ The fourth row of the menu (`Recognition language: <X>`) opens a
 submenu of choices. The currently-selected option is prefixed with a
 checkmark (`✓`); clicking another entry makes that the new default.
 The choice is persisted between launches — no restart, no model
-reload. For the API backend the language is forwarded as the
-`language` form field on every `POST /v1/audio/transcriptions` request
-so the gateway skips its own detection. With `Auto-detect` selected
-the field is omitted. The menu is disabled while the **GigaAM**
+reload. For the API backend the choice is also forwarded on every
+request (see [API](#api)). The menu is disabled while the **GigaAM**
 backend is active: GigaAM is a fixed multilingual CTC model
 (Russian / English / Kazakh / Kyrgyz / Uzbek) with no language
 parameter — it detects the language from the audio itself.
@@ -342,9 +340,9 @@ in the **Transcribing** step.
 
 - **What it does:** runs the in-process mlx-whisper
   (`mlx-community/whisper-large-v3-turbo`).
-- **Cost:** ~1.6 GB RAM permanently after first warmup, plus a brief
-  transient peak during recognition that is returned to the OS right
-  after each dictation.
+- **Cost:** ~1.8–2.0 GB RAM resident after the first warmup (~1.6 GB
+  of weights), plus a brief transient decode peak that is returned to
+  the OS right after each dictation.
 - **Disk:** ~1.5 GB Whisper weights downloaded on first launch to
   `~/.cache/huggingface/hub/`. Cached for subsequent launches.
 - **Network:** none after the first download — works fully offline.
@@ -609,13 +607,13 @@ dictate-mac selftest --no-mic   # skip the microphone roundtrip
 If you installed via the `.app` rather than from a venv, the same
 subcommands are reachable via the bundle's executable
 (``/Applications/DictateMac.app/Contents/MacOS/DictateMac selftest``).
-Exit code 0 if all 27 checks pass, 1 otherwise. Each check prints a
+Exit code 0 if all 28 checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail; the checks are
 `model-load`, `vad-silence`, `vad-speech-like`, `asr-smoke`,
 `gigaam-model-load`, `gigaam-asr-smoke`, `typer-dispatch`,
 `ssl-certifi`, `config-v1-migration`, `config-invalid-endpoint`,
 `config-api-required-when-api`, `config-local-kinds`,
-`audio-wav-roundtrip`, `api-transcribe-headers`,
+`audio-wav-roundtrip`, `last-recording-wav`, `api-transcribe-headers`,
 `api-transcribe-auto-language`, `api-models-check`, `gigaam-dispatch`,
 `whisper-decode-options`, `gigaam-chunking`, `podlodka-dispatch`,
 `warmup-retry`, `recorder-portaudio-retry`, `hotkey-escape-event`,
@@ -659,7 +657,7 @@ revoke `com.local.dictate-mac` in
 **Known limitations:**
 
 - RAM is held permanently after the first startup **when using a
-  local backend**: ~1.8 GB for Whisper, ~1.8 GB for Podlodka fp16,
+  local backend**: ~1.8–2.0 GB for Whisper, ~1.8 GB for Podlodka fp16,
   ~1.1 GB for Podlodka q8, ~1.4 GB for GigaAM. The API backend
   doesn't load any ASR weights into memory; its startup is
   instantaneous and can run on Mac models where the mlx weights
