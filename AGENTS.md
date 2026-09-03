@@ -128,7 +128,7 @@ dictate-mac/
 │       │   └── timing.py   # raises — we never call add_word_timestamps
 │       └── torchaudio/     # Python stub used by the silero-vad path
 ├── src/dictate_mac/
-│   ├── __init__.py         # __version__ (currently 0.6.0)
+│   ├── __init__.py         # __version__ (currently 0.6.2)
 │   ├── __main__.py         # python -m dictate_mac
 │   ├── cli.py              # argparse + daemon / warmup / selftest / menubar
 │   ├── audio.py            # Recorder + silero-vad trim_silence
@@ -159,11 +159,11 @@ reach across module boundaries — use the public surface listed.
 | `transcriber.py`          | ASR backends: local mlx-whisper (stock + Podlodka fp16/q8) + GigaAM CTC + OpenAI-compatible API | `transcribe(audio, language, *, model_kind, api_*)`, `check_api_model_available`, `ensure_warm_async`, `warm`, `is_model_cached`, `model_loaded`, `gigaam_loaded`, `MODEL_REPO`, `PODLODKA_REPO`, `PODLODKA_REVISION`, `PODLODKA_VARIANTS`, `_audio_to_wav_bytes` |
 | `typer.py`                | keystroke injection into focused window                       | `type_text(text, backend, per_char_delay_ms)`, `type_text_quartz`, `type_text_osascript` |
 | `hotkey.py`               | global Right Option watcher (+ Esc cancel)                    | `HotkeyWatcher(output_queue)`, `HotkeyEdge`, `HotkeyEvent`              |
-| `state.py`                | orchestrates the loop: warm → arm → record → transcribe → type | `DictationMachine`, `Settings`, `State`, `SOUND_START`, `SOUND_END`     |
+| `state.py`                | orchestrates the loop: warm → arm → record → transcribe → type | `DictationMachine`, `Settings`, `State`, `SOUND_START`, `SOUND_END`, `_save_last_recording` |
 | `config.py`               | persisted settings (language + ASR backend + API credentials) | `AUTO`, `SUPPORTED_ISO_639_1`, `MODEL_KINDS`, `MODEL_KIND_LOCAL`, `MODEL_KIND_GIGAAM`, `MODEL_KIND_API`, `menu_items`, `display_name`, `load`, `save`, `PersistedSettings`, `normalize_endpoint`, `endpoint_scheme_ok`, `detect_system_primary_language` |
 | `menubar.py`              | NSStatusItem + Model/language submenus                        | `run_menubar(settings)`, `MenubarApp`                                   |
 | `model_settings_dialog.py`| API credentials modal — 3 fields, GET /models check on OK     | `ApiModelSettingsDialog`, `ApiModelSettingsResult`                      |
-| `logutils.py`             | stderr vs `~/Library/Logs/dictate-mac/dictate-mac.log`        | `configure_logging`, `is_app_bundle`, `LOG_FILE`, `LOG_FORMAT`          |
+| `logutils.py`             | stderr vs `~/Library/Logs/dictate-mac/dictate-mac.log`        | `configure_logging`, `is_app_bundle`, `LOG_FILE`, `LOG_FORMAT`, `LAST_RECORDING_WAV` |
 | `selftest.py`             | headless smoke tests                                          | `run_all`, `cmd_selftest`, individual `test_*` functions               |
 
 ## 4. Architecture and threading
@@ -700,8 +700,8 @@ no supported match maps to `"auto"`.
 
 ## 10. Testing
 
-`dictate-mac selftest [--no-mic]` runs twenty-seven checks; optionally a
-twenty-eighth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
+`dictate-mac selftest [--no-mic]` runs twenty-eight checks; optionally a
+twenty-ninth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 
 1. **model-load** — `mlx_whisper` weights load into RAM.
 2. **vad-silence** — 1 s of zeros → VAD returns `[]`.
@@ -731,46 +731,49 @@ twenty-eighth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
     save/load roundtrip.
 13. **audio-wav-roundtrip** — numpy → 16-bit PCM WAV → numpy, with
     amplitude preserved to within one LSB.
-14. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
+14. **last-recording-wav** — `state._save_last_recording` writes the
+    trimmed buffer as a valid 16 kHz mono 16-bit WAV (path patched to a
+    temp dir; parent directory created on demand).
+15. **api-transcribe-headers** — mocked `POST /v1/audio/transcriptions`
     confirms the URL, multipart `model` field, `Authorization:
     Bearer` header and (when configured) `language` field are all
     wired correctly.
-15. **api-transcribe-auto-language** — when `language="auto"`, the
+16. **api-transcribe-auto-language** — when `language="auto"`, the
     `language` field is omitted from the form so the gateway falls
     back to its own detection.
-16. **api-models-check** — mocked `GET /v1/models` handles 200+id,
+17. **api-models-check** — mocked `GET /v1/models` handles 200+id,
     200-missing-id, 401, 404 and 500 correctly, and never leaks the
     fake API key string into any error.
-17. **gigaam-dispatch** — `transcribe(model_kind="gigaam")` routes to
+18. **gigaam-dispatch** — `transcribe(model_kind="gigaam")` routes to
     the GigaAM path (mocked) and the default still routes to whisper.
-18. **whisper-decode-options** — the whisper call always passes
+19. **whisper-decode-options** — the whisper call always passes
     `condition_on_previous_text=True`, `temperature=(0.0, 0.2, 0.4)`
     and `best_of=3`; it sends a style `initial_prompt` for the 30
     mapped languages (`ru`/`en`/`zh`/`de` checked) and none for
     `auto` or unmapped languages.
-19. **gigaam-chunking** — a 45 s buffer is decoded as three 20 s /
+20. **gigaam-chunking** — a 45 s buffer is decoded as three 20 s /
     2 s-overlap windows (mocked model), midpoint stitching dedupes
     overlap words, and a 5 s buffer stays one-shot.
-20. **podlodka-dispatch** — `transcribe(model_kind="podlodka_fp16"/
+21. **podlodka-dispatch** — `transcribe(model_kind="podlodka_fp16"/
     "podlodka_q8")` routes to the local whisper path (mocked) with
     the kind forwarded for weight selection.
-21. **warmup-retry** — a simulated warmup failure publishes a
+22. **warmup-retry** — a simulated warmup failure publishes a
     retryable ERROR with the hotkey watcher still armed; a synthetic
     Right Option press re-runs the warmup into READY.
-22. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
+23. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
     open raising `PortAudioError -9986` triggers one
     `sd._terminate()`/`sd._initialize()` cycle and a successful retry.
-23. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
+24. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
     cancel press; Cmd+Esc is filtered out.
-24. **podlodka-fp16-model-load** — Podlodka fp16 weights download
+25. **podlodka-fp16-model-load** — Podlodka fp16 weights download
     (first run) and load into RAM via `warm(MODEL_KIND_PODLODKA_FP16)`;
     any previously loaded whisper-family model is released first.
-25. **podlodka-fp16-asr-smoke** — `transcribe(model_kind=
+26. **podlodka-fp16-asr-smoke** — `transcribe(model_kind=
     "podlodka_fp16")` returns a string of any length on synthetic
     audio.
-26. **podlodka-q8-model-load** — same as 24 for the q8 quantization.
-27. **podlodka-q8-asr-smoke** — same as 25 for the q8 quantization.
-28. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
+27. **podlodka-q8-model-load** — same as 25 for the q8 quantization.
+28. **podlodka-q8-asr-smoke** — same as 26 for the q8 quantization.
+29. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
     report durations.
 
 `dictate-mac warmup --skip-mic-test` is the deterministic "is it

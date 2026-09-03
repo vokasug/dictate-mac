@@ -536,6 +536,56 @@ def test_audio_to_wav_bytes_round_trip() -> Result:
     )
 
 
+def test_last_recording_wav_saved() -> Result:
+    """``state._save_last_recording`` writes the trimmed buffer as a
+    valid 16 kHz mono 16-bit WAV next to the log file (path patched
+    to a temp dir so the user's real last recording is untouched)."""
+    import tempfile
+    import wave
+    from pathlib import Path
+    from unittest import mock
+
+    from dictate_mac import state as state_mod
+
+    duration = 0.5
+    sr = SAMPLE_RATE
+    t = np.arange(int(duration * sr)) / sr
+    audio = (0.4 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wav_path = Path(tmp) / "sub" / "last-recording.wav"
+        with mock.patch.object(state_mod, "LAST_RECORDING_WAV", wav_path):
+            state_mod._save_last_recording(audio)
+
+        if not wav_path.exists():
+            return Result(
+                "last-recording-wav",
+                False,
+                f"{wav_path} was not written",
+            )
+        with wave.open(str(wav_path), "rb") as r:
+            params = (r.getnchannels(), r.getsampwidth(), r.getframerate())
+            frames = np.frombuffer(r.readframes(r.getnframes()), dtype=np.int16)
+
+    if params != (1, 2, sr):
+        return Result(
+            "last-recording-wav",
+            False,
+            f"wav params {params} (expected (1, 2, {sr}))",
+        )
+    if frames.size != audio.size:
+        return Result(
+            "last-recording-wav",
+            False,
+            f"{frames.size} samples in wav (expected {audio.size})",
+        )
+    return Result(
+        "last-recording-wav",
+        True,
+        f"parent dir created, {frames.size} samples at 16 kHz mono int16",
+    )
+
+
 def test_api_transcribe_sends_model_id_and_bearer() -> Result:
     """Mock ``requests.post`` and confirm the ASR builder sends the
     correct URL, multipart `model` field and `Authorization` header."""
@@ -1300,6 +1350,7 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_config_missing_api_fields_when_kind_local,
         test_config_local_kinds_valid,
         test_audio_to_wav_bytes_round_trip,
+        test_last_recording_wav_saved,
         test_api_transcribe_sends_model_id_and_bearer,
         test_api_transcribe_omits_language_when_auto,
         test_models_endpoint_check_accepts_and_rejects,

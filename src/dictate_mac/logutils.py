@@ -26,6 +26,10 @@ LOG_FORMAT: Final = "%(asctime)s %(levelname)-5s %(name)s: %(message)s"
 DEFAULT_LOG_LEVEL: Final = "INFO"
 LOG_DIR: Final[Path] = Path.home() / "Library" / "Logs" / "dictate-mac"
 LOG_FILE: Final[Path] = LOG_DIR / "dictate-mac.log"
+# Every dictation overwrites this with the VAD-trimmed audio that was
+# sent to the ASR backend (16 kHz mono 16-bit PCM). Useful for
+# debugging bad recognition: replay exactly what the model heard.
+LAST_RECORDING_WAV: Final[Path] = LOG_DIR / "last-recording.wav"
 
 logger = logging.getLogger("dictate_mac.logutils")
 

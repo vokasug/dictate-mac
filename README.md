@@ -264,7 +264,8 @@ Input Monitoring
 Microphone
 Accessibility
 ─────────────────
-Open log
+Open log file
+Open log folder (contains last recording)
 About
 Restart
 Quit
@@ -284,7 +285,8 @@ Quit
 | `Input Monitoring`         | Opens System Settings → Privacy & Security → Input Monitoring. |
 | `Microphone`               | Opens System Settings → Privacy & Security → Microphone. |
 | `Accessibility`            | Opens System Settings → Privacy & Security → Accessibility. |
-| `Open log`                 | Opens the daemon log file (`~/Library/Logs/dictate-mac/dictate-mac.log` for the bundled `.app`) in the default app for `.log`. In CLI mode logs go to stderr, so the parent directory (or Console.app) is opened instead. |
+| `Open log file`            | Opens the daemon log file (`~/Library/Logs/dictate-mac/dictate-mac.log` for the bundled `.app`) in the default app for `.log`. In CLI mode logs go to stderr, so the parent directory (or Console.app) is opened instead. |
+| `Open log folder (contains last recording)` | Opens `~/Library/Logs/dictate-mac/` in Finder. Besides the log it holds `last-recording.wav` — the last VAD-trimmed buffer that was sent to the ASR backend (16 kHz mono, overwritten on every dictation). Handy for debugging bad recognition: replay exactly what the model heard. |
 | `About`                    | Opens https://github.com/vokasug/dictate-mac in the default browser. |
 | `Restart`                  | Quits the app and re-opens it (via detached `osascript`). |
 | `Quit`                     | ⌘Q (AppKit auto-renders the shortcut on the right). |
@@ -564,8 +566,12 @@ reachable via the bundle's executable:
 Logs go to `~/Library/Logs/dictate-mac/dictate-mac.log` (truncate-on-start)
 when launched as a bundle, or to stderr when run from a terminal —
 the same `logutils` module decides based on whether `sys.executable`
-is inside a `DictateMac.app` bundle. The **Open log** menu item
-opens the log file in your default `.log` viewer (Console.app).
+is inside a `DictateMac.app` bundle. The **Open log file** menu item
+opens the log file in your default `.log` viewer (Console.app), and
+**Open log folder (contains last recording)** opens the directory in
+Finder. Next to the log the daemon keeps `last-recording.wav` — the
+last VAD-trimmed audio buffer sent to the ASR backend, overwritten on
+every dictation.
 
 ## How it works
 
@@ -625,7 +631,7 @@ plus an optional `mic-roundtrip`.
 | `Status: Error: see logs` after first Right Option press | Microphone not granted | macOS will prompt on first press; if you declined, open System Settings → Privacy & Security → Microphone and toggle dictate-mac on. |
 | Russian text doesn't appear in Citrix | Citrix unicode input disabled | In Citrix Viewer → Preferences → Keyboard, enable **Send Unicode keyboard input** (default in modern versions). Or use `--output=osascript`. |
 | Status stuck on `Starting…` / `Downloading…` | Hugging Face unreachable (local mode), or the bundle can't find embedded Python | `curl -I https://huggingface.co/mlx-community/whisper-large-v3-turbo`. If the model is downloaded but loading still fails, rebuild with `./build.sh --clean`. |
-| `Model download failed — press Right Option to retry` | The first-run download failed (no network, DNS/VPN hiccup, HF outage) | Bring the network up and press **Right Option** — the warmup re-runs without an app restart. Check the log via **Open log** if it keeps failing. |
+| `Model download failed — press Right Option to retry` | The first-run download failed (no network, DNS/VPN hiccup, HF outage) | Bring the network up and press **Right Option** — the warmup re-runs without an app restart. Check the log via **Open log file** if it keeps failing. |
 | `mlx` fails to install / load | Python 3.14 (no wheel) | Recreate venv: `uv venv --python 3.13 .venv --force && uv pip install -e .` |
 | API mode returns HTTP 429 | The OpenAI-compatible gateway is rate-limiting | Some gateways (e.g. `whisper-large-v3-turbo`) have a 1-request-per-10-15-seconds cap on certain upstream providers. Switch the menu to a different model id, or to Local if the same model is acceptable. |
 | Too much RAM usage | A local backend occupies ~1.1–1.8 GB permanently | API mode doesn't load any ASR weights; Podlodka q8 is the lightest whisper-family option (~1.1 GB). Switch if RAM is tight. |

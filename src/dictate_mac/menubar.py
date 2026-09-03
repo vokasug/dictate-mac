@@ -24,10 +24,14 @@ Context menu (top → bottom)
 * ``Microphone`` — clickable; opens the Microphone pane.
 * ``Accessibility`` — clickable; opens the Accessibility pane.
 * separator
-* ``Open log`` — clickable; opens the daemon log file
+* ``Open log file`` — clickable; opens the daemon log file
   (``~/Library/Logs/dictate-mac/dictate-mac.log`` in app-bundle mode)
   in the user's default app. In CLI mode logs go to stderr and the
   parent directory (or Console.app) is opened instead.
+* ``Open log folder (contains last recording)`` — clickable; opens
+  ``~/Library/Logs/dictate-mac/`` in Finder. Besides the log it holds
+  ``last-recording.wav`` — the last VAD-trimmed buffer sent to the
+  ASR backend.
 * ``About`` — clickable; opens https://github.com/vokasug/dictate-mac in the
   default browser.
 * ``Restart`` — clickable; relaunches the ``.app`` bundle.
@@ -280,7 +284,13 @@ class MenubarApp(rumps.App):
         )
 
         # ---- Open log / About / Restart / Quit -----------------------
-        self._open_log_item = rumps.MenuItem("Open log", callback=self._open_log_file)
+        self._open_log_item = rumps.MenuItem(
+            "Open log file", callback=self._open_log_file
+        )
+        self._open_log_folder_item = rumps.MenuItem(
+            "Open log folder (contains last recording)",
+            callback=self._open_log_folder,
+        )
         self._about_item = rumps.MenuItem("About", callback=self._open_about)
         self._restart_item = rumps.MenuItem("Restart", callback=self._restart_app)
         self._quit_item = rumps.MenuItem("Quit", callback=rumps.quit_application)
@@ -314,6 +324,7 @@ class MenubarApp(rumps.App):
             self._perm_accessibility,
             None,  # separator
             self._open_log_item,
+            self._open_log_folder_item,
             self._about_item,
             self._restart_item,
             self._quit_item,
@@ -476,6 +487,22 @@ class MenubarApp(rumps.App):
             subprocess.Popen(["open", "-a", "Console"])
         except Exception as exc:  # noqa: BLE001
             logger.debug("could not open Console: %s", exc)
+
+    def _open_log_folder(self, _sender) -> None:
+        """Open the log directory in Finder.
+
+        The folder holds both the daemon log and ``last-recording.wav``
+        (the last VAD-trimmed buffer sent to the ASR backend). Created
+        on demand so Finder never gets a non-existent path — in CLI
+        mode nothing may have written there yet.
+        """
+        from dictate_mac.logutils import LOG_DIR
+
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            self._open_url(LOG_DIR.as_uri())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not open log folder: %s", exc)
 
     def _restart_app(self, _sender) -> None:
         """Quit, then re-open the current ``.app`` bundle.

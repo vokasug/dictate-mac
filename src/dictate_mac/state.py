@@ -45,7 +45,7 @@ from typing import Optional
 
 import numpy as np
 
-from dictate_mac.audio import Recorder, trim_silence
+from dictate_mac.audio import SAMPLE_RATE, Recorder, trim_silence
 from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
@@ -59,8 +59,10 @@ from dictate_mac.hotkey import (
     HotkeyEvent,
     HotkeyWatcher,
 )
+from dictate_mac.logutils import LAST_RECORDING_WAV
 from dictate_mac.transcriber import (
     DEFAULT_API_TIMEOUT,
+    _audio_to_wav_bytes,
     ensure_warm_async,
     is_model_cached,
     transcribe as asr_transcribe,
@@ -108,6 +110,21 @@ def _play(sound_path: str) -> None:
         logger.debug("afplay not available; skipping sound %s", sound_path)
     except Exception as exc:  # noqa: BLE001
         logger.debug("afplay %s failed: %s", sound_path, exc)
+
+
+def _save_last_recording(audio: np.ndarray) -> None:
+    """Overwrite ``LAST_RECORDING_WAV`` with the VAD-trimmed buffer that
+    is about to be sent to the ASR backend (16 kHz mono 16-bit PCM).
+
+    Written before transcription so the file survives an ASR failure —
+    replaying it shows exactly what the model heard. Best-effort: a
+    write failure is logged and never breaks the dictation flow.
+    """
+    try:
+        LAST_RECORDING_WAV.parent.mkdir(parents=True, exist_ok=True)
+        LAST_RECORDING_WAV.write_bytes(_audio_to_wav_bytes(audio, SAMPLE_RATE))
+    except OSError as exc:
+        logger.warning("could not save last recording to %s: %s", LAST_RECORDING_WAV, exc)
 
 
 class DictationMachine:
@@ -434,6 +451,8 @@ class DictationMachine:
             logger.info("[vad] no speech — typing nothing")
             await self._publish_state(State.READY, "[idle] ready")
             return
+
+        _save_last_recording(trimmed)
 
         await self._publish_state(State.TRANSCRIBING, "[asr] transcribing …")
         t0 = time.perf_counter()
