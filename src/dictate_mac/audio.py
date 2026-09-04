@@ -3,9 +3,10 @@
 * Capture microphone audio at 16 kHz mono float32 via PortAudio
   (``sounddevice.InputStream``).
 * Buffer samples in a thread-safe ``numpy.ndarray`` while recording.
-* On stop, apply ``silero-vad`` to drop leading/trailing silence so the
-  recognizer sees only speech. If the recording contains no speech, the
-  trimmed result is empty — callers MUST check before transcribing.
+* On stop, apply ``silero-vad`` to drop leading/trailing silence and to
+  shorten internal pauses longer than 600 ms, so the recognizer sees only
+  speech. If the recording contains no speech, the trimmed result is
+  empty — callers MUST check before transcribing.
 """
 
 from __future__ import annotations
@@ -158,9 +159,14 @@ def trim_silence(
     *,
     min_speech_ms: int = 300,
     min_silence_ms: int = 100,
-    speech_pad_ms: int = 100,
+    speech_pad_ms: int = 300,
+    max_internal_pause_ms: int = 600,
 ) -> np.ndarray:
     """Return ``audio`` with leading/trailing silence removed.
+
+    Internal pauses longer than ``max_internal_pause_ms`` are shortened
+    to exactly ``max_internal_pause_ms`` (keeping the pause symmetrically
+    around its midpoint); shorter pauses are left untouched.
 
     Returns an empty array if no speech is detected. ``audio`` must be
     float32 mono at 16 kHz.
@@ -183,9 +189,25 @@ def trim_silence(
         logger.info("vad: no speech detected in recording")
         return np.zeros(0, dtype=np.float32)
 
-    start = timestamps[0]["start"]
-    end = timestamps[-1]["end"]
-    trimmed = audio[start:end].copy()
+    # Timestamps already include speech_pad_ms on each side, so the raw
+    # gap between two segments is the original pause minus the pads. Cap
+    # the gap so the TOTAL internal pause never exceeds
+    # max_internal_pause_ms.
+    max_gap = max(
+        0, (max_internal_pause_ms - 2 * speech_pad_ms) * SAMPLE_RATE // 1000
+    )
+    parts = []
+    prev_end = None
+    for ts in timestamps:
+        if prev_end is not None:
+            gap = audio[prev_end:ts["start"]]
+            if gap.size > max_gap:
+                half = max_gap // 2
+                gap = np.concatenate([gap[:half], gap[gap.size - (max_gap - half):]])
+            parts.append(gap)
+        parts.append(audio[ts["start"]:ts["end"]])
+        prev_end = ts["end"]
+    trimmed = np.concatenate(parts)
     logger.info(
         "vad: trimmed %.2fs -> %.2fs (speech segments=%d)",
         audio.size / SAMPLE_RATE,

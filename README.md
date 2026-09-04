@@ -84,14 +84,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.6.2-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.6.2-macos.zip)
+[`DictateMac-v0.7.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.7.0-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
 Compressed download is ~93 MB; the extracted `.app` is ~284 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.6.2-macos.zip
+shasum -a 256 DictateMac-v0.7.0-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -100,7 +100,7 @@ shasum -a 256 DictateMac-v0.6.2-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.6.2-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.7.0-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app

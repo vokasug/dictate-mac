@@ -1335,11 +1335,51 @@ def test_hotkey_escape_event() -> Result:
     )
 
 
+def test_vad_pause_clamp() -> Result:
+    """Internal pauses longer than the cap are shortened to exactly it.
+
+    Mocks silero's ``get_speech_timestamps`` so the check is
+    deterministic (the real model is tuned for real speech and may not
+    fire on synthetic audio): two 1 s speech segments separated by a
+    3 s pause, 300 ms pad each side, 600 ms cap → the output must hold
+    the two padded segments with at most a 600 ms pause between them.
+    """
+    from unittest import mock
+
+    sr = SAMPLE_RATE
+    seg = np.full(sr, 0.5, dtype=np.float32)  # 1 s "speech"
+    gap = np.zeros(3 * sr, dtype=np.float32)  # 3 s pause
+    audio = np.concatenate([np.zeros(sr, dtype=np.float32), seg, gap, seg,
+                            np.zeros(sr, dtype=np.float32)])
+    pad = int(0.3 * sr)
+    seg1 = {"start": sr - pad, "end": 2 * sr + pad}
+    seg2 = {"start": 5 * sr - pad, "end": 6 * sr + pad}
+    with mock.patch(
+        "silero_vad.get_speech_timestamps", return_value=[seg1, seg2]
+    ):
+        out = trim_silence(audio, speech_pad_ms=300, max_internal_pause_ms=600)
+    # total = two padded segments (1.6 s each) + residual gap capped so the
+    # whole internal pause is 600 ms → residual = 600 - 2*300 = 0 samples
+    expected = 2 * (sr + 2 * pad)
+    if out.size != expected:
+        return Result(
+            "vad-pause-clamp",
+            False,
+            f"expected {expected} samples (2 padded segments, 600 ms pause), got {out.size}",
+        )
+    return Result(
+        "vad-pause-clamp",
+        True,
+        "3 s internal pause shortened to the 600 ms cap",
+    )
+
+
 def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
     tests: List[Callable[[], Result]] = [
         test_model_load,
         test_vad_silence,
         test_vad_speech_like,
+        test_vad_pause_clamp,
         lambda: test_asr_smoke(language=language),
         test_gigaam_model_load,
         test_gigaam_asr_smoke,
