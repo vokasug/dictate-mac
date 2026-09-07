@@ -415,6 +415,16 @@ the reason is still valid after you check the source.
   and the endpoint — never the key. Selftest mock-fakes the API
   key as `SECRET_KEY_DO_NOT_LEAK` and explicitly asserts the
   substring never appears in any captured error.
+- **Transcription failure types a one-line error marker.** When
+  `transcribe()` raises in `state._stop_and_process`, the machine
+  types `[dictate: <brief>]` into the focused window (same
+  quartz/osascript backend and per-char delay as normal output)
+  before returning to READY — silence reads as a broken daemon.
+  `_brief_error_text` strips the response body from
+  `ASR endpoint returned HTTP <code> '<body>'` messages and
+  truncates everything else to 120 chars, so the marker is never a
+  wall of JSON and the key can't leak through it. A typing failure
+  of the marker itself is logged, never fatal.
 
 ### Backend switching and warmup
 
@@ -734,8 +744,8 @@ no supported match maps to `"auto"`.
 
 ## 10. Testing
 
-`dictate-mac selftest [--no-mic]` runs twenty-nine checks; optionally a
-thirtieth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
+`dictate-mac selftest [--no-mic]` runs thirty checks; optionally a
+thirty-first mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 
 1. **model-load** — `mlx_whisper` weights load into RAM.
 2. **vad-silence** — 1 s of zeros → VAD returns `[]`.
@@ -797,20 +807,23 @@ thirtieth mic roundtrip. Exits 0 if all PASS, 1 on any FAIL.
 23. **warmup-retry** — a simulated warmup failure publishes a
     retryable ERROR with the hotkey watcher still armed; a synthetic
     Right Option press re-runs the warmup into READY.
-24. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
+24. **error-marker** — a mocked ASR failure in `_stop_and_process`
+    types the `[dictate: ASR endpoint returned HTTP 503]` marker
+    (response body stripped) and returns the machine to READY.
+25. **recorder-portaudio-retry** — a mocked first `sd.InputStream`
     open raising `PortAudioError -9986` triggers one
     `sd._terminate()`/`sd._initialize()` cycle and a successful retry.
-25. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
+26. **hotkey-escape-event** — a synthetic Esc keyDown is queued as a
     cancel press; Cmd+Esc is filtered out.
-26. **podlodka-fp16-model-load** — Podlodka fp16 weights download
+27. **podlodka-fp16-model-load** — Podlodka fp16 weights download
     (first run) and load into RAM via `warm(MODEL_KIND_PODLODKA_FP16)`;
     any previously loaded whisper-family model is released first.
-27. **podlodka-fp16-asr-smoke** — `transcribe(model_kind=
+28. **podlodka-fp16-asr-smoke** — `transcribe(model_kind=
     "podlodka_fp16")` returns a string of any length on synthetic
     audio.
-28. **podlodka-q8-model-load** — same as 26 for the q8 quantization.
-29. **podlodka-q8-asr-smoke** — same as 27 for the q8 quantization.
-30. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
+29. **podlodka-q8-model-load** — same as 27 for the q8 quantization.
+30. **podlodka-q8-asr-smoke** — same as 28 for the q8 quantization.
+31. **mic-roundtrip** *(unless `--no-mic`)* — record 1.5 s, run VAD + ASR,
     report durations.
 
 `dictate-mac warmup --skip-mic-test` is the deterministic "is it

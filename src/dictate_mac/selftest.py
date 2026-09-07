@@ -1213,6 +1213,71 @@ def test_warmup_failure_retryable() -> Result:
     )
 
 
+def test_transcribe_error_marker() -> Result:
+    """An ASR failure must not end in silence: ``_stop_and_process``
+    types a one-line error marker (HTTP body stripped) and returns to
+    READY."""
+    import asyncio
+
+    import dictate_mac.state as state_mod
+    from dictate_mac.state import DictationMachine, Settings, State
+
+    typed: list[str] = []
+
+    class _FakeRecorder:
+        def stop(self):  # noqa: ANN001, ANN202
+            return np.zeros(16000, dtype=np.float32)
+
+    def fake_transcribe(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError(
+            "ASR endpoint returned HTTP 503 "
+            "'{\"error\":{\"message\":\"Provider returned 429\",\"code\":429}}'"
+        )
+
+    real_trim = state_mod.trim_silence
+    real_save = state_mod._save_last_recording
+    real_transcribe = state_mod.asr_transcribe
+    real_emit = state_mod.emit_text
+    real_play = state_mod._play
+    state_mod.trim_silence = lambda audio: audio
+    state_mod._save_last_recording = lambda audio: None
+    state_mod.asr_transcribe = fake_transcribe
+    state_mod.emit_text = lambda text, backend, delay: typed.append(text)
+    state_mod._play = lambda sound: None
+    try:
+
+        async def scenario() -> State:
+            machine = DictationMachine(settings=Settings(model_kind="local"))
+            with machine._state_lock:
+                machine._state_value = State.RECORDING
+            machine._recorder = _FakeRecorder()  # type: ignore[attr-defined]
+            await machine._stop_and_process()
+            return machine.state
+
+        final_state = asyncio.run(scenario())
+    except Exception as exc:  # noqa: BLE001
+        return Result("error-marker", False, f"raised: {exc}")
+    finally:
+        state_mod.trim_silence = real_trim
+        state_mod._save_last_recording = real_save
+        state_mod.asr_transcribe = real_transcribe
+        state_mod.emit_text = real_emit
+        state_mod._play = real_play
+    if final_state != State.READY:
+        return Result(
+            "error-marker",
+            False,
+            f"machine ended in {final_state}, expected READY",
+        )
+    if typed != ["[dictate: ASR endpoint returned HTTP 503] "]:
+        return Result("error-marker", False, f"typed {typed!r}")
+    return Result(
+        "error-marker",
+        True,
+        "ASR failure types '[dictate: …]' marker (body stripped) and returns to READY",
+    )
+
+
 def test_recorder_portaudio_retry() -> Result:
     """When the first ``sd.InputStream`` open fails with a PortAudioError
     (stale device snapshot after a topology change), Recorder must
@@ -1399,6 +1464,7 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_gigaam_chunking,
         test_podlodka_dispatch,
         test_warmup_failure_retryable,
+        test_transcribe_error_marker,
         test_recorder_portaudio_retry,
         test_hotkey_escape_event,
         # Podlodka variants — real download + load + inference. Each

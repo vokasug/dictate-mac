@@ -223,6 +223,7 @@ pass, install_name / signature rewrites) live in
 | Speak                        | Your voice is captured                             |
 | **Press Right Option again** | Recording stops; recognition runs; text is typed   |
 | **Press Esc while recording**| Recording is cancelled — nothing is recognised or typed |
+| **Recognition fails**        | A short error marker is typed instead, e.g. `[dictate: ASR endpoint returned HTTP 503]` |
 
 - **Use the right Option key specifically** — not the left one. If
   Cmd / Ctrl / Shift is held at the same time, the press is ignored
@@ -418,6 +419,10 @@ in the **Transcribing** step.
 - **Disk:** no ASR weights.
 - **Network:** every recording.
 - **Speed:** round-trip to gateway (typically 0.3–1 s).
+- **On failure:** a short error marker is typed into the focused
+  window instead of text, e.g. `[dictate: ASR endpoint returned
+  HTTP 503]` — the response body is stripped and any other message
+  is truncated, so the marker stays one line.
 - **Config:** the **API** menu row opens a dialog with three fields
   (Endpoint, API key, Model ID). On OK the dialog GETs
   `{endpoint}/models` with the same bearer token and verifies the

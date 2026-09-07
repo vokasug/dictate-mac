@@ -127,6 +127,22 @@ def _save_last_recording(audio: np.ndarray) -> None:
         logger.warning("could not save last recording to %s: %s", LAST_RECORDING_WAV, exc)
 
 
+def _brief_error_text(exc: Exception) -> str:
+    """Shorten an ASR failure to a one-line marker for on-screen typing.
+
+    ``_transcribe_api`` embeds the response body after the status
+    ("ASR endpoint returned HTTP 503 '<body>'"); the body is noise at
+    the cursor, so only the status line is kept. Any other message is
+    truncated so the marker never floods the focused window.
+    """
+    text = str(exc)
+    if text.startswith("ASR endpoint returned HTTP"):
+        return text.split(" '", 1)[0]
+    if len(text) > 120:
+        text = text[:120] + "…"
+    return text
+
+
 class DictationMachine:
     """Top-level orchestrator. Owns the recorder, hotkey watcher, and state."""
 
@@ -479,11 +495,22 @@ class DictationMachine:
             dt = time.perf_counter() - t0
             backend = self._settings.model_kind
             logger.warning(
-                "[asr] %s back-end failed after %.2fs: %s — typing nothing",
+                "[asr] %s back-end failed after %.2fs: %s — typing error marker",
                 backend,
                 dt,
                 exc,
             )
+            marker = f"[dictate: {_brief_error_text(exc)}] "
+            await self._publish_state(State.TYPING, "[type] error marker …")
+            try:
+                await asyncio.to_thread(
+                    emit_text,
+                    marker,
+                    self._settings.output_backend,
+                    self._settings.per_char_delay_ms,
+                )
+            except Exception as type_exc:  # noqa: BLE001
+                logger.error("[type] error marker failed: %s", type_exc)
             await self._publish_state(State.READY, "[idle] ready")
             return
         dt = time.perf_counter() - t0
