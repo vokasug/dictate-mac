@@ -50,6 +50,7 @@ clipboard.
 - [How it works](#how-it-works)
 - [Verifying & troubleshooting](#verifying--troubleshooting)
 - [Uninstall & known limitations](#uninstall--known-limitations)
+- [Development](#development)
 
 ---
 
@@ -212,8 +213,8 @@ open dist/DictateMac.app
 The result is fully self-contained — everything except the ~1.5 GB
 local Whisper weights (downloaded at first launch) is bundled.
 **Bundle size: ~284 MB.** Dev-side details (stubs, post-build strip
-pass, install_name / signature rewrites) live in
-[`AGENTS.md` § 6](AGENTS.md#6-build-pipeline-buildsh).
+pass, install_name / signature rewrites) are documented inline in
+`setup.py` and `build.sh`.
 
 ## Usage
 
@@ -596,9 +597,8 @@ loads lazily on the first recording. Whisper recognitions take ~3 s on
 M1; GigaAM is typically faster on its five supported languages; API
 mode takes only the gateway round-trip (typically 0.3–1 s).
 
-The full architecture diagram, threading table, and the rationale
-behind each of these choices live in
-[`AGENTS.md` § 4–5](AGENTS.md#4-architecture-and-threading).
+The rationale behind each of these choices is documented inline in
+the source modules (see [Development](#development)).
 
 ## Verifying & troubleshooting
 
@@ -612,7 +612,7 @@ dictate-mac selftest --no-mic   # skip the microphone roundtrip
 If you installed via the `.app` rather than from a venv, the same
 subcommands are reachable via the bundle's executable
 (``/Applications/DictateMac.app/Contents/MacOS/DictateMac selftest``).
-Exit code 0 if all 28 checks pass, 1 otherwise. Each check prints a
+Exit code 0 if all checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail; the checks are
 `model-load`, `vad-silence`, `vad-speech-like`, `asr-smoke`,
 `gigaam-model-load`, `gigaam-asr-smoke`, `typer-dispatch`,
@@ -700,5 +700,41 @@ revoke `com.local.dictate-mac` in
   raise `RuntimeError`). All audio in the bundle flows through
   PortAudio → `numpy.ndarray` → silero-vad → whisper — the only
    path we use. Dev-side rationale and how the stubs work around the
-   upstream torch / torchaudio wheels lives in
-   [`AGENTS.md`](AGENTS.md#6-build-pipeline-buildsh).
+  upstream torch / torchaudio wheels is documented inline in
+  `setup.py`.
+
+---
+
+## Development
+
+The source is the documentation: every module in `src/dictate_mac/`
+carries header comments explaining what it owns and why, and
+non-obvious decisions are commented at the code they protect
+(`transcriber.py` for the ASR backends, `hotkey.py` for the Quartz
+tap, `setup.py` + `build.sh` for the bundle pipeline). Read them
+before changing anything. Things that are easy to break and not
+obvious from any single file:
+
+- **MLX work is pinned to one thread** — `transcriber._mlx_executor`.
+  Loading a model on one thread and running inference on another
+  crashes with `There is no Stream(gpu, N) in current thread`.
+- **No `pynput`, no clipboard** — typing is raw Quartz `CGEvent`
+  Unicode injection; `pynput` drops Cyrillic in some configs and the
+  clipboard doesn't cross the Citrix channel.
+- **certifi must exist on disk in the bundle** — a zip-bundled
+  `cacert.pem` breaks every HTTPS call (HF downloads, API backend).
+  See `_extract_native_runtime_libs` / `_rewrite_boot_script` in
+  `setup.py`.
+- **The API key is never logged and never appears in error messages** —
+  selftest fakes it as `SECRET_KEY_DO_NOT_LEAK` and asserts it never
+  leaks. Keep it that way.
+- **Smoke-test every `.app` build** before shipping:
+  `dist/DictateMac.app/Contents/MacOS/DictateMac selftest --no-mic`
+  must be all-PASS. The bundled runtime is not the venv — a green
+  source-venv selftest proves nothing about the bundle.
+- **No secrets or personal data in tracked files** — no real
+  credentials, endpoints, names, or `/Users/<name>/…` paths;
+  placeholders (`<your-host>`, `~/…`) only.
+- Keep this README describing the **current** state only — no
+  changelogs or work history — and update it together with any
+  change that alters behaviour.

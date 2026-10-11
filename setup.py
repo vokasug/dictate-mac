@@ -656,7 +656,7 @@ def _strip_info_plist_paths(app_dist: Path) -> None:
     # (it hashes Info.plist contents, and we just changed them). Re-apply
     # ad-hoc signing so Gatekeeper sees a consistent bundle. Without
     # this, ``spctl --assess`` rejects the bundle, and TCC silently
-    # denies permission prompts at runtime — see AGENTS.md §5.
+    # denies permission prompts at runtime.
     try:
         subprocess.run(
             [

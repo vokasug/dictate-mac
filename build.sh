@@ -17,7 +17,7 @@
 #        - rewrite PythonExecutable in Info.plist to @executable_path
 #          (removes the developer's venv path from the shipped bundle)
 #        - re-sign the bundle ad-hoc with codesign
-#      See AGENTS.md §6 for the full description.
+#      See setup.py's per-step comments for the full description.
 #
 # Usage:
 #   ./build.sh           # full rebuild
