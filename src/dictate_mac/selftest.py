@@ -209,7 +209,7 @@ def test_typer_dispatch() -> Result:
 
     expected = [
         ("quartz", ("hello",), {"per_char_delay_ms": 8}),
-        ("paste", ("instant",), {}),
+        ("paste", ("instant",), {"restore_clipboard": True}),
         ("osascript", ("world",), {}),
         ("quartz", ("default",), {"per_char_delay_ms": 8}),
     ]
@@ -1291,7 +1291,7 @@ def test_transcribe_error_marker() -> Result:
     state_mod.trim_silence = lambda audio: audio
     state_mod._save_last_recording = lambda audio: None
     state_mod.asr_transcribe = fake_transcribe
-    state_mod.emit_text = lambda text, backend, delay: typed.append(text)
+    state_mod.emit_text = lambda *args: typed.append(args[0])
     state_mod._play = lambda sound: None
     try:
 

@@ -252,10 +252,12 @@ pass, install_name / signature rewrites) are documented inline in
     moment to appear.
   - **Instant paste (Cmd+V)** — the text is placed on the clipboard
     and a simulated Cmd+V pastes it in one shot. Instant regardless of
-    length. The previous clipboard contents are restored ~0.25 s after
-    the paste (only *string* content is preserved — images/files
-    previously copied are lost). Does **not** work in remote-desktop
-    sessions without a shared clipboard.
+    length. Does **not** work in remote-desktop sessions without a
+    shared clipboard. The companion toggle **Restore clipboard after
+    paste** (on by default) returns the previous clipboard contents
+    ~0.25 s after the paste — only *string* content is preserved, so
+    images/files previously copied are lost. Turn the toggle off to
+    keep the transcript on the clipboard for manual re-pasting.
 
 ## The menu bar
 
@@ -278,6 +280,7 @@ Recognition language: Auto-detect
 Text insertion method
 ✓ Type keystrokes (for remote desktops)
   Instant paste (Cmd+V)
+  ✓ Restore clipboard after paste
 ─────────────────
 Permissions (reset permissions and restart app if not working)
 Input Monitoring
@@ -303,7 +306,8 @@ Quit
 | `Recognition language: <X>`| Clickable. Opens a submenu of `Auto-detect` and the 100 ISO-639-1 languages Whisper supports. Selecting one persists the choice and applies to the next recording (no restart). |
 | `Text insertion method`    | Disabled, descriptive header.                        |
 | `Type keystrokes (for remote desktops)` | Clickable. Default. Types character-by-character via CGEvent Unicode events — the only method that works in Citrix/RDP/VNC sessions without a shared clipboard. Persists to the config file; applies to the next dictation, no restart. |
-| `Instant paste (Cmd+V)`    | Clickable. Places the recognized text on the clipboard and pastes it with a simulated Cmd+V — instant for any text length. The previous clipboard contents are restored ~0.25 s later (string content only). Persists to the config file; applies to the next dictation, no restart. |
+| `Instant paste (Cmd+V)`    | Clickable. Places the recognized text on the clipboard and pastes it with a simulated Cmd+V — instant for any text length. Persists to the config file; applies to the next dictation, no restart. |
+| `Restore clipboard after paste` | Checkbox, enabled only while *Instant paste* is active. Checked (default): the previous clipboard contents are restored ~0.25 s after the paste (string content only). Unchecked: the transcript stays on the clipboard, so a manual Cmd+V pastes it again. Persists; no restart. |
 | `Permissions (… )` header  | Disabled, descriptive label.                        |
 | `Input Monitoring`         | Opens System Settings → Privacy & Security → Input Monitoring. |
 | `Microphone`               | Opens System Settings → Privacy & Security → Microphone. |
@@ -504,7 +508,8 @@ Schema v2 contents look like:
   "api_endpoint": "https://<your-host>/v1",
   "api_key": "<your-bearer-token>",
   "api_model_id": "<your-model-id>",
-  "output_backend": "quartz"
+  "output_backend": "quartz",
+  "paste_restore_clipboard": true
 }
 ```
 
@@ -519,6 +524,10 @@ Schema v2 contents look like:
   typing), `"paste"` (instant clipboard + Cmd+V insertion), or
   `"osascript"` (System Events fallback). Files written before this
   field existed load as `"quartz"`.
+- `paste_restore_clipboard` (default `true`) controls whether *Instant
+  paste* restores the previous clipboard contents after inserting.
+  Files without the field load as `true`. Only meaningful with
+  `output_backend` = `"paste"`.
 
 Older configs written by v0.2.x (schema v1, only `language`) load
 unchanged — the missing fields default to `local` and empty strings,
@@ -717,11 +726,12 @@ revoke `com.local.dictate-mac` in
   grant.
 - Citrix Viewer requires **Send Unicode keyboard input** to be
   enabled (default in modern versions).
-- *Instant paste (Cmd+V)* temporarily overwrites the clipboard; the
-  previous contents are restored ~0.25 s after the paste, but only
-  *string* content is preserved — images/files copied earlier are
-  lost. It also does not reach remote-desktop sessions (Citrix, RDP,
-  VNC) without a shared clipboard — keep *Type keystrokes* for those.
+- *Instant paste (Cmd+V)* temporarily overwrites the clipboard. With
+  *Restore clipboard after paste* on (default), the previous contents
+  are restored ~0.25 s after the paste, but only *string* content is
+  preserved — images/files copied earlier are lost. It also does not
+  reach remote-desktop sessions (Citrix, RDP, VNC) without a shared
+  clipboard — keep *Type keystrokes* for those.
 - The app is launched manually in v1 — no LaunchAgent, no
   auto-start at login.
 - The `.app` is unsigned, ad-hoc, not notarised. macOS Gatekeeper

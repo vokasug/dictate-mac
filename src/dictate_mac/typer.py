@@ -121,13 +121,16 @@ def _post_cmd_v() -> None:
 def paste_text(
     text: str,
     restore_delay_s: float = PASTE_RESTORE_DELAY_S,
+    restore_clipboard: bool = True,
 ) -> None:
     """Instant insertion: clipboard + simulated Cmd+V.
 
     Puts ``text`` on the general pasteboard, posts Cmd+V into the
-    focused window, then restores the previous clipboard contents after
-    a short delay (the receiving app reads the pasteboard
-    asynchronously, so restoring immediately would race it).
+    focused window, then — when ``restore_clipboard`` is true — restores
+    the previous clipboard contents after a short delay (the receiving
+    app reads the pasteboard asynchronously, so restoring immediately
+    would race it). With ``restore_clipboard=False`` the pasted text
+    stays on the clipboard, so the user can paste it again by hand.
 
     Known limitations: the clipboard is temporarily overwritten, and
     only *string* clipboard content is preserved across the paste —
@@ -137,14 +140,20 @@ def paste_text(
     """
     if not text:
         return
-    logger.info("pasting %d chars via clipboard + Cmd+V", len(text))
+    logger.info(
+        "pasting %d chars via clipboard + Cmd+V (restore=%s)",
+        len(text),
+        restore_clipboard,
+    )
 
     try:
         from AppKit import NSPasteboard, NSPasteboardTypeString
 
         pb = NSPasteboard.generalPasteboard()
-        old = pb.stringForType_(NSPasteboardTypeString)
-        old = str(old) if old is not None else None
+        old = None
+        if restore_clipboard:
+            saved = pb.stringForType_(NSPasteboardTypeString)
+            old = str(saved) if saved is not None else None
 
         pb.clearContents()
         pb.setString_forType_(text, NSPasteboardTypeString)
@@ -152,10 +161,13 @@ def paste_text(
         time.sleep(PASTE_SETTLE_S)
         _post_cmd_v()
 
-        time.sleep(restore_delay_s)
-        pb.clearContents()
-        if old is not None:
-            pb.setString_forType_(old, NSPasteboardTypeString)
+        if restore_clipboard:
+            # Give the receiving app time to read the pasteboard before
+            # we overwrite it with the restored content.
+            time.sleep(restore_delay_s)
+            pb.clearContents()
+            if old is not None:
+                pb.setString_forType_(old, NSPasteboardTypeString)
     except Exception:  # noqa: BLE001
         logger.exception("paste_text failed")
 
@@ -191,10 +203,11 @@ def type_text(
     text: str,
     backend: str = "quartz",
     per_char_delay_ms: int = DEFAULT_PER_CHAR_DELAY_MS,
+    paste_restore_clipboard: bool = True,
 ) -> None:
     """Dispatch to the selected backend."""
     if backend == "paste":
-        paste_text(text)
+        paste_text(text, restore_clipboard=paste_restore_clipboard)
         return
     if backend == "osascript":
         type_text_osascript(text)

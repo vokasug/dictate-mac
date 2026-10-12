@@ -90,6 +90,7 @@ class State(str, enum.Enum):
 class Settings:
     output_backend: str = "quartz"
     per_char_delay_ms: int = 8
+    paste_restore_clipboard: bool = True
     language: str = "auto"
     model_kind: str = MODEL_KIND_LOCAL
     api_endpoint: str = ""
@@ -508,6 +509,7 @@ class DictationMachine:
                     marker,
                     self._settings.output_backend,
                     self._settings.per_char_delay_ms,
+                    self._settings.paste_restore_clipboard,
                 )
             except Exception as type_exc:  # noqa: BLE001
                 logger.error("[type] error marker failed: %s", type_exc)
@@ -530,6 +532,7 @@ class DictationMachine:
             text_with_sep,
             self._settings.output_backend,
             self._settings.per_char_delay_ms,
+            self._settings.paste_restore_clipboard,
         )
         await self._publish_state(State.READY, "[idle] ready")
 

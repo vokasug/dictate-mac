@@ -354,6 +354,7 @@ def cmd_menubar(args: argparse.Namespace) -> int:
     persisted = load_persisted()
     settings = Settings(
         output_backend=persisted.output_backend,
+        paste_restore_clipboard=persisted.paste_restore_clipboard,
         language=persisted.language,
         model_kind=persisted.model_kind,
         api_endpoint=persisted.api_endpoint,

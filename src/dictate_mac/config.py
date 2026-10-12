@@ -21,13 +21,14 @@ v2 (current) — produced on every save:
 
     ``{"_v": 2, "language": ..., "model_kind": "local|api",
        "api_endpoint": ..., "api_key": ..., "api_model_id": ...,
-       "output_backend": "quartz|paste|osascript"}``
+       "output_backend": "quartz|paste|osascript",
+       "paste_restore_clipboard": true|false}``
 
 v1 files load as ``model_kind="local"`` and empty API fields; the
 persisted language is preserved untouched. v2 files written before
-``output_backend`` existed load as ``output_backend="quartz"``.
-Subsequent saves rewrite the file in the current form — no manual
-migration needed.
+``output_backend`` existed load as ``output_backend="quartz"``; files
+without ``paste_restore_clipboard`` load as ``true``. Subsequent saves
+rewrite the file in the current form — no manual migration needed.
 
 Behaviour
 ---------
@@ -132,6 +133,7 @@ class PersistedSettings:
     api_key: str = ""
     api_model_id: str = ""
     output_backend: str = OUTPUT_BACKEND_QUARTZ
+    paste_restore_clipboard: bool = True
 
     def is_valid(self) -> bool:
         if self.language != AUTO and self.language not in SUPPORTED_ISO_639_1:
@@ -139,6 +141,8 @@ class PersistedSettings:
         if self.model_kind not in MODEL_KINDS:
             return False
         if self.output_backend not in OUTPUT_BACKENDS:
+            return False
+        if not isinstance(self.paste_restore_clipboard, bool):
             return False
         if self.model_kind == MODEL_KIND_API:
             if not endpoint_scheme_ok(normalize_endpoint(self.api_endpoint)):
@@ -322,6 +326,16 @@ def _read(path: Path) -> Optional[PersistedSettings]:
         )
         return None
 
+    paste_restore = data.get("paste_restore_clipboard", True)
+    if not isinstance(paste_restore, bool):
+        logger.warning(
+            "config %s has non-bool paste_restore_clipboard %r; leaving "
+            "file intact and falling back to defaults",
+            path,
+            paste_restore,
+        )
+        return None
+
     settings = PersistedSettings(
         language=language,
         model_kind=model_kind,
@@ -329,6 +343,7 @@ def _read(path: Path) -> Optional[PersistedSettings]:
         api_key=raw_key,
         api_model_id=raw_model_id,
         output_backend=output_backend,
+        paste_restore_clipboard=paste_restore,
     )
     if not settings.is_valid():
         logger.warning(

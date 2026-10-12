@@ -24,6 +24,10 @@ Context menu (top → bottom)
   share the clipboard); paste inserts instantly via the clipboard + a
   simulated Cmd+V. A click persists the choice and applies to the next
   dictation — no restart required.
+* ``Restore clipboard after paste`` — checkbox row, enabled only while
+  Instant paste is active. Checked (default): the previous clipboard
+  contents are restored ~0.25 s after the paste. Unchecked: the
+  transcript stays on the clipboard for manual re-pasting.
 * separator
 * ``Permissions (reset permission and restart app if not working):``
   — disabled header.
@@ -134,6 +138,7 @@ PERMISSIONS_HEADER = (
 OUTPUT_HEADER = "Text insertion method"
 OUTPUT_LABEL_QUARTZ = "Type keystrokes (for remote desktops)"
 OUTPUT_LABEL_PASTE = "Instant paste (Cmd+V)"
+OUTPUT_LABEL_RESTORE = "Restore clipboard after paste"
 ABOUT_URL = "https://github.com/vokasug/dictate-mac"
 
 PERM_LABEL_INPUT_MONITORING = "Input Monitoring"
@@ -294,6 +299,11 @@ class MenubarApp(rumps.App):
             self._format_output_title(OUTPUT_BACKEND_PASTE, settings.output_backend),
             callback=self._make_output_callback(OUTPUT_BACKEND_PASTE),
         )
+        self._output_restore_item = rumps.MenuItem(
+            self._format_restore_title(settings.paste_restore_clipboard),
+            callback=self._toggle_paste_restore,
+        )
+        self._update_output_restore_enabled()
 
         # ---- permissions header (disabled) ----------------------------
         self._perms_header = rumps.MenuItem(PERMISSIONS_HEADER, callback=None)
@@ -354,6 +364,7 @@ class MenubarApp(rumps.App):
             self._output_header,
             self._output_quartz_item,
             self._output_paste_item,
+            self._output_restore_item,
             None,  # separator
             self._perms_header,
             self._perm_input_monitoring,
@@ -367,6 +378,17 @@ class MenubarApp(rumps.App):
             self._quit_item,
         ]
 
+        # NSMenu auto-validation (autoenablesItems, the default) re-enables
+        # any item whose target responds to its action on every menu open —
+        # silently overriding our setEnabled_(False) calls on clickable
+        # rows (the Restore-clipboard toggle, the language parent in
+        # GigaAM mode). Turn it off: rumps items default to enabled, the
+        # headers above are explicitly disabled, and the dynamic rows are
+        # managed by _update_* helpers.
+        try:
+            self.menu._menu.setAutoenablesItems_(False)
+        except Exception:  # noqa: BLE001
+            logger.debug("could not disable menu autoenabling", exc_info=True)
 
         # NOTE: the permission rows are static shortcuts to System
         # Settings; their labels do not change at runtime.
@@ -761,6 +783,52 @@ class MenubarApp(rumps.App):
         new_paste = self._format_output_title(OUTPUT_BACKEND_PASTE, active)
         if self._output_paste_item.title != new_paste:
             self._output_paste_item.title = new_paste
+        self._update_output_restore_enabled()
+
+    # -- restore-clipboard toggle (paste mode only) -----------------------
+
+    @staticmethod
+    def _format_restore_title(enabled: bool) -> str:
+        prefix = CHECK_GLYPH if enabled else "  "
+        return f"{prefix}{OUTPUT_LABEL_RESTORE}"
+
+    def _update_output_restore_enabled(self) -> None:
+        """Grey out the restore row unless Instant paste is active."""
+        enabled = self._settings.output_backend == OUTPUT_BACKEND_PASTE
+        try:
+            self._output_restore_item._menuitem.setEnabled_(enabled)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _toggle_paste_restore(self, _sender) -> None:
+        """Toggle whether paste mode restores the previous clipboard.
+
+        ON (default): ~0.25 s after the paste the clipboard reverts to
+        what it held before the dictation. OFF: the pasted transcript
+        stays on the clipboard so the user can paste it again manually.
+        Applies to the next dictation, persists to the config file.
+        """
+        self._settings.paste_restore_clipboard = (
+            not self._settings.paste_restore_clipboard
+        )
+        try:
+            self._persist_settings()
+        except ValueError as exc:
+            logger.warning("rejected paste_restore_clipboard toggle: %s", exc)
+            self._settings.paste_restore_clipboard = (
+                not self._settings.paste_restore_clipboard
+            )
+            return
+
+        logger.info(
+            "paste restore clipboard: %s",
+            "on" if self._settings.paste_restore_clipboard else "off",
+        )
+        new_title = self._format_restore_title(
+            self._settings.paste_restore_clipboard
+        )
+        if self._output_restore_item.title != new_title:
+            self._output_restore_item.title = new_title
 
     # -- model submenu ----------------------------------------------------
 
@@ -879,6 +947,7 @@ class MenubarApp(rumps.App):
                 api_key=self._settings.api_key,
                 api_model_id=self._settings.api_model_id,
                 output_backend=self._settings.output_backend,
+                paste_restore_clipboard=self._settings.paste_restore_clipboard,
             )
             )
         except OSError as exc:
