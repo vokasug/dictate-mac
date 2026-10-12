@@ -17,6 +17,14 @@ Context menu (top → bottom)
   ``~/.config/dictate-mac/config.json`` and updates the in-memory
   settings — no restart required.
 * separator
+* ``Text insertion method:`` — disabled header.
+* ``Type keystrokes (for remote desktops)`` / ``Instant paste (Cmd+V)``
+  — clickable rows; the active method carries a checkmark. Keystrokes
+  type character-by-character (works in Citrix/RDP sessions that don't
+  share the clipboard); paste inserts instantly via the clipboard + a
+  simulated Cmd+V. A click persists the choice and applies to the next
+  dictation — no restart required.
+* separator
 * ``Permissions (reset permission and restart app if not working):``
   — disabled header.
 * ``Input Monitoring`` — clickable; opens the Input Monitoring pane of
@@ -100,6 +108,8 @@ from dictate_mac.config import (
     MODEL_KIND_LOCAL,
     MODEL_KIND_PODLODKA_FP16,
     MODEL_KIND_PODLODKA_Q8,
+    OUTPUT_BACKEND_PASTE,
+    OUTPUT_BACKEND_QUARTZ,
     normalize_endpoint,
 )
 from dictate_mac.state import DictationMachine, Settings, State
@@ -121,6 +131,9 @@ MODEL_HEADER = "Model (changing will restart app)"
 PERMISSIONS_HEADER = (
     "Permissions (reset permissions and restart app if not working)"
 )
+OUTPUT_HEADER = "Text insertion method"
+OUTPUT_LABEL_QUARTZ = "Type keystrokes (for remote desktops)"
+OUTPUT_LABEL_PASTE = "Instant paste (Cmd+V)"
 ABOUT_URL = "https://github.com/vokasug/dictate-mac"
 
 PERM_LABEL_INPUT_MONITORING = "Input Monitoring"
@@ -262,6 +275,26 @@ class MenubarApp(rumps.App):
             callback=self._open_model_api_dialog,
         )
 
+        # ---- text insertion method rows --------------------------------
+        # Disabled header + two clickable rows with a checkmark on the
+        # active one. Switching applies immediately (the worker reads
+        # ``output_backend`` on every dictation) and persists to the
+        # config file — no restart.
+        self._output_header = rumps.MenuItem(OUTPUT_HEADER, callback=None)
+        try:
+            self._output_header._menuitem.setEnabled_(False)
+        except Exception:  # noqa: BLE001
+            pass
+
+        self._output_quartz_item = rumps.MenuItem(
+            self._format_output_title(OUTPUT_BACKEND_QUARTZ, settings.output_backend),
+            callback=self._make_output_callback(OUTPUT_BACKEND_QUARTZ),
+        )
+        self._output_paste_item = rumps.MenuItem(
+            self._format_output_title(OUTPUT_BACKEND_PASTE, settings.output_backend),
+            callback=self._make_output_callback(OUTPUT_BACKEND_PASTE),
+        )
+
         # ---- permissions header (disabled) ----------------------------
         self._perms_header = rumps.MenuItem(PERMISSIONS_HEADER, callback=None)
         try:
@@ -317,6 +350,10 @@ class MenubarApp(rumps.App):
             self._model_api_item,
             None,  # separator
             self._lang_parent,
+            None,  # separator
+            self._output_header,
+            self._output_quartz_item,
+            self._output_paste_item,
             None,  # separator
             self._perms_header,
             self._perm_input_monitoring,
@@ -674,6 +711,57 @@ class MenubarApp(rumps.App):
             if item.title != new_item:
                 item.title = new_item
 
+    # -- text insertion method rows ---------------------------------------
+
+    @staticmethod
+    def _format_output_title(kind: str, active_kind: str) -> str:
+        prefix = CHECK_GLYPH if kind == active_kind else "  "
+        label = (
+            OUTPUT_LABEL_PASTE if kind == OUTPUT_BACKEND_PASTE
+            else OUTPUT_LABEL_QUARTZ
+        )
+        return f"{prefix}{label}"
+
+    def _make_output_callback(self, kind: str):
+        def callback(_sender) -> None:
+            self._set_output_backend(kind)
+
+        return callback
+
+    def _set_output_backend(self, kind: str) -> None:
+        """Apply a new text-insertion method.
+
+        Updates the in-memory ``Settings`` (the worker thread reads
+        ``output_backend`` on every dictation, so the change applies to
+        the next recording without a restart), persists it to
+        ``~/.config/dictate-mac/config.json`` via atomic write, and
+        refreshes the checkmarks.
+        """
+        if kind == self._settings.output_backend:
+            return
+
+        previous = self._settings.output_backend
+        self._settings.output_backend = kind
+        try:
+            self._persist_settings()
+        except ValueError as exc:
+            logger.warning("rejected output_backend=%s: %s", kind, exc)
+            self._settings.output_backend = previous
+            return
+
+        logger.info("text insertion method switched: %s -> %s", previous, kind)
+        self._refresh_output_menu()
+
+    def _refresh_output_menu(self) -> None:
+        """Resync the Text-insertion rows with current state."""
+        active = self._settings.output_backend
+        new_quartz = self._format_output_title(OUTPUT_BACKEND_QUARTZ, active)
+        if self._output_quartz_item.title != new_quartz:
+            self._output_quartz_item.title = new_quartz
+        new_paste = self._format_output_title(OUTPUT_BACKEND_PASTE, active)
+        if self._output_paste_item.title != new_paste:
+            self._output_paste_item.title = new_paste
+
     # -- model submenu ----------------------------------------------------
 
     def _trigger_model_restart(self) -> None:
@@ -784,13 +872,14 @@ class MenubarApp(rumps.App):
         """Atomically persist the in-memory ``Settings`` to the config file."""
         try:
             config_mod.save(
-                config_mod.PersistedSettings(
-                    language=self._settings.language,
-                    model_kind=self._settings.model_kind,
-                    api_endpoint=self._settings.api_endpoint,
-                    api_key=self._settings.api_key,
-                    api_model_id=self._settings.api_model_id,
-                )
+            config_mod.PersistedSettings(
+                language=self._settings.language,
+                model_kind=self._settings.model_kind,
+                api_endpoint=self._settings.api_endpoint,
+                api_key=self._settings.api_key,
+                api_model_id=self._settings.api_model_id,
+                output_backend=self._settings.output_backend,
+            )
             )
         except OSError as exc:
             logger.warning("could not persist settings: %s", exc)

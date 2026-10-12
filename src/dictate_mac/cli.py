@@ -54,12 +54,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument(
         "--output",
-        choices=("quartz", "osascript"),
+        choices=("quartz", "paste", "osascript"),
         default="quartz",
         help=(
-            "Keystroke injection backend. 'quartz' uses raw CGEvent "
-            "(default, best for Citrix). 'osascript' uses System Events "
-            "via AppleScript — fallback when Citrix drops characters."
+            "Text injection backend. 'quartz' types character-by-"
+            "character via raw CGEvent (default, works in remote "
+            "desktops like Citrix/RDP). 'paste' inserts instantly via "
+            "the clipboard + a simulated Cmd+V (fast in ordinary apps; "
+            "temporarily overwrites the clipboard). 'osascript' uses "
+            "System Events via AppleScript — fallback when Citrix "
+            "drops characters. For the menu bar app the choice is "
+            "persisted in the config file (Text insertion menu); this "
+            "flag only applies to CLI subcommands."
         ),
     )
     common.add_argument(
@@ -334,12 +340,12 @@ def cmd_menubar(args: argparse.Namespace) -> int:
     """Launch the menu bar app.
 
     Sources all persisted settings (language, ASR backend,
-    API credentials) from
+    API credentials, text-insertion method) from
     ``~/.config/dictate-mac/config.json`` — created on first run if
     needed via :func:`dictate_mac.config.load`. The ``--language``,
-    ``--model-kind`` and ``--api-*`` flags from argparse are NOT
-    applied here; CLI flags exist only for subcommands that do not
-    persist state.
+    ``--output``, ``--model-kind`` and ``--api-*`` flags from argparse
+    are NOT applied here; CLI flags exist only for subcommands that do
+    not persist state.
     """
     from dictate_mac.config import load as load_persisted
     from dictate_mac.menubar import run_menubar
@@ -347,7 +353,7 @@ def cmd_menubar(args: argparse.Namespace) -> int:
 
     persisted = load_persisted()
     settings = Settings(
-        output_backend=args.output,
+        output_backend=persisted.output_backend,
         language=persisted.language,
         model_kind=persisted.model_kind,
         api_endpoint=persisted.api_endpoint,

@@ -20,11 +20,14 @@ v1 (legacy) — recognised for read but never written by the current code:
 v2 (current) — produced on every save:
 
     ``{"_v": 2, "language": ..., "model_kind": "local|api",
-       "api_endpoint": ..., "api_key": ..., "api_model_id": ...}``
+       "api_endpoint": ..., "api_key": ..., "api_model_id": ...,
+       "output_backend": "quartz|paste|osascript"}``
 
 v1 files load as ``model_kind="local"`` and empty API fields; the
-persisted language is preserved untouched. Subsequent saves rewrite
-the file as v2 — no manual migration needed.
+persisted language is preserved untouched. v2 files written before
+``output_backend`` existed load as ``output_backend="quartz"``.
+Subsequent saves rewrite the file in the current form — no manual
+migration needed.
 
 Behaviour
 ---------
@@ -77,6 +80,15 @@ MODEL_KINDS = (
     MODEL_KIND_API,
 )
 
+OUTPUT_BACKEND_QUARTZ = "quartz"
+OUTPUT_BACKEND_PASTE = "paste"
+OUTPUT_BACKEND_OSASCRIPT = "osascript"
+OUTPUT_BACKENDS = (
+    OUTPUT_BACKEND_QUARTZ,
+    OUTPUT_BACKEND_PASTE,
+    OUTPUT_BACKEND_OSASCRIPT,
+)
+
 LANGUAGES: Dict[str, str] = {
     "en": "english", "zh": "chinese", "de": "german", "es": "spanish",
     "ru": "russian", "ko": "korean", "fr": "french", "ja": "japanese",
@@ -119,11 +131,14 @@ class PersistedSettings:
     api_endpoint: str = ""
     api_key: str = ""
     api_model_id: str = ""
+    output_backend: str = OUTPUT_BACKEND_QUARTZ
 
     def is_valid(self) -> bool:
         if self.language != AUTO and self.language not in SUPPORTED_ISO_639_1:
             return False
         if self.model_kind not in MODEL_KINDS:
+            return False
+        if self.output_backend not in OUTPUT_BACKENDS:
             return False
         if self.model_kind == MODEL_KIND_API:
             if not endpoint_scheme_ok(normalize_endpoint(self.api_endpoint)):
@@ -297,12 +312,23 @@ def _read(path: Path) -> Optional[PersistedSettings]:
         )
         return None
 
+    output_backend = data.get("output_backend", OUTPUT_BACKEND_QUARTZ)
+    if not isinstance(output_backend, str) or output_backend not in OUTPUT_BACKENDS:
+        logger.warning(
+            "config %s has unsupported output_backend %r; leaving file "
+            "intact and falling back to defaults",
+            path,
+            output_backend,
+        )
+        return None
+
     settings = PersistedSettings(
         language=language,
         model_kind=model_kind,
         api_endpoint=raw_endpoint,
         api_key=raw_key,
         api_model_id=raw_model_id,
+        output_backend=output_backend,
     )
     if not settings.is_valid():
         logger.warning(

@@ -22,7 +22,9 @@ Voice dictation for macOS with **five ASR backends** selectable at runtime:
 Press **Right Option** → speak → press **Right Option** again.
 Recognized text is typed character-by-character into the focused
 window — including Citrix Workspace sessions that don't share the
-clipboard.
+clipboard. A second, instant insertion method (**Instant paste**:
+clipboard + simulated Cmd+V) is selectable in the menu for everyday
+apps where speed matters more than remote-desktop compatibility.
 
 - 100 ISO-639-1 languages + `Auto-detect` — applies to the Whisper,
   Podlodka and API backends (GigaAM detects its five languages on its
@@ -85,14 +87,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.7.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.7.0-macos.zip)
+[`DictateMac-v0.9.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.9.0-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
 Compressed download is ~93 MB; the extracted `.app` is ~284 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.7.0-macos.zip
+shasum -a 256 DictateMac-v0.9.0-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -101,7 +103,7 @@ shasum -a 256 DictateMac-v0.7.0-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.7.0-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.9.0-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -242,6 +244,18 @@ pass, install_name / signature rewrites) are documented inline in
 - **Where the text goes** — TextEdit, Pages, Notes, browsers
   (address bar + form fields), Slack, Telegram, VSCode, terminals,
   **Citrix Workspace / Citrix Viewer**.
+- **Two insertion methods** (menu → *Text insertion method*):
+  - **Type keystrokes (for remote desktops)** — the default. Text is
+    typed character-by-character via CGEvent Unicode events, which
+    tunnels through Citrix/RDP/VNC sessions that don't share the macOS
+    clipboard. Costs ~8 ms per character, so long dictations take a
+    moment to appear.
+  - **Instant paste (Cmd+V)** — the text is placed on the clipboard
+    and a simulated Cmd+V pastes it in one shot. Instant regardless of
+    length. The previous clipboard contents are restored ~0.25 s after
+    the paste (only *string* content is preserved — images/files
+    previously copied are lost). Does **not** work in remote-desktop
+    sessions without a shared clipboard.
 
 ## The menu bar
 
@@ -260,6 +274,10 @@ Model (changing will restart app)
   API (https://<your-host>/v1)
 ─────────────────
 Recognition language: Auto-detect
+─────────────────
+Text insertion method
+✓ Type keystrokes (for remote desktops)
+  Instant paste (Cmd+V)
 ─────────────────
 Permissions (reset permissions and restart app if not working)
 Input Monitoring
@@ -283,6 +301,9 @@ Quit
 | `Local GigaAM (...)`       | Clickable. Switches to the local GigaAM multilingual CTC backend and restarts the daemon. The Recognition-language menu is disabled while this backend is active (the model has no language parameter). |
 | `API (<endpoint>)`         | Clickable. Opens the API credentials dialog (Endpoint / API key / Model ID). On a successful OK the dialog GETs `<endpoint>/models` to verify the endpoint + model id, persists the values, switches the active backend to API, and restarts the daemon. |
 | `Recognition language: <X>`| Clickable. Opens a submenu of `Auto-detect` and the 100 ISO-639-1 languages Whisper supports. Selecting one persists the choice and applies to the next recording (no restart). |
+| `Text insertion method`    | Disabled, descriptive header.                        |
+| `Type keystrokes (for remote desktops)` | Clickable. Default. Types character-by-character via CGEvent Unicode events — the only method that works in Citrix/RDP/VNC sessions without a shared clipboard. Persists to the config file; applies to the next dictation, no restart. |
+| `Instant paste (Cmd+V)`    | Clickable. Places the recognized text on the clipboard and pastes it with a simulated Cmd+V — instant for any text length. The previous clipboard contents are restored ~0.25 s later (string content only). Persists to the config file; applies to the next dictation, no restart. |
 | `Permissions (… )` header  | Disabled, descriptive label.                        |
 | `Input Monitoring`         | Opens System Settings → Privacy & Security → Input Monitoring. |
 | `Microphone`               | Opens System Settings → Privacy & Security → Microphone. |
@@ -482,7 +503,8 @@ Schema v2 contents look like:
   "model_kind": "api",
   "api_endpoint": "https://<your-host>/v1",
   "api_key": "<your-bearer-token>",
-  "api_model_id": "<your-model-id>"
+  "api_model_id": "<your-model-id>",
+  "output_backend": "quartz"
 }
 ```
 
@@ -493,6 +515,10 @@ Schema v2 contents look like:
   `"podlodka_q8"`, `"gigaam"`, or `"api"`.
 - The remaining three fields are only meaningful with
   `model_kind=api`.
+- `output_backend` is `"quartz"` (default, character-by-character
+  typing), `"paste"` (instant clipboard + Cmd+V insertion), or
+  `"osascript"` (System Events fallback). Files written before this
+  field existed load as `"quartz"`.
 
 Older configs written by v0.2.x (schema v1, only `language`) load
 unchanged — the missing fields default to `local` and empty strings,
@@ -521,7 +547,7 @@ binary and the source venv:
 
 Common flags (before or after the subcommand): `--quiet`,
 `--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}`,
-`--output {quartz,osascript}`, `--language {auto|<iso-639-1>}`,
+`--output {quartz,paste,osascript}`, `--language {auto|<iso-639-1>}`,
 `--model-kind {local,podlodka_fp16,podlodka_q8,gigaam,api}`,
 `--api-endpoint <url>`, `--api-key <key>`, `--model-id <id>`. The
 last three are meaningful only with `--model-kind=api`; `daemon`
@@ -553,6 +579,10 @@ dictate-mac daemon \
   --api-key=<your-bearer-token> \
   --model-id=<your-model-id>
 
+# Instant paste insertion for this CLI session (menu bar app: use the
+# Text insertion menu instead — the choice persists):
+dictate-mac daemon --output=paste
+
 # Pre-download the GigaAM weights without starting the daemon:
 dictate-mac warmup --model-kind=gigaam --skip-mic-test
 
@@ -582,8 +612,9 @@ every dictation.
 The menu bar app (rumps / NSApp, main thread) polls a thread-safe
 state snapshot from an asyncio worker thread that owns the pipeline:
 PortAudio recorder → silero-vad trim → the ASR backend selected by
-`model_kind` in the config file → a Quartz CGEvent Unicode typer that
-injects the text keystroke-by-keystroke into the focused window. A
+`model_kind` in the config file → the text injector selected by the
+*Text insertion method* setting (a Quartz CGEvent Unicode typer that
+types keystroke-by-keystroke, or an instant clipboard + Cmd+V paste). A
 third thread runs the Quartz CGEventTap that watches Right Option (and
 Esc as the recording-cancel key) and feeds events into the worker
 through a bounded queue.
@@ -614,14 +645,17 @@ subcommands are reachable via the bundle's executable
 (``/Applications/DictateMac.app/Contents/MacOS/DictateMac selftest``).
 Exit code 0 if all checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail; the checks are
-`model-load`, `vad-silence`, `vad-speech-like`, `asr-smoke`,
+`model-load`, `vad-silence`, `vad-speech-like`, `vad-pause-clamp`,
+`asr-smoke`,
 `gigaam-model-load`, `gigaam-asr-smoke`, `typer-dispatch`,
+`paste-clipboard-roundtrip`,
 `ssl-certifi`, `config-v1-migration`, `config-invalid-endpoint`,
 `config-api-required-when-api`, `config-local-kinds`,
 `audio-wav-roundtrip`, `last-recording-wav`, `api-transcribe-headers`,
 `api-transcribe-auto-language`, `api-models-check`, `gigaam-dispatch`,
 `whisper-decode-options`, `gigaam-chunking`, `podlodka-dispatch`,
-`warmup-retry`, `recorder-portaudio-retry`, `hotkey-escape-event`,
+`warmup-retry`, `error-marker`, `recorder-portaudio-retry`,
+`hotkey-escape-event`,
 `podlodka-fp16-model-load`, `podlodka-fp16-asr-smoke`,
 `podlodka-q8-model-load`, `podlodka-q8-asr-smoke`,
 plus an optional `mic-roundtrip`.
@@ -633,6 +667,7 @@ plus an optional `mic-roundtrip`.
 | Right Option press isn't detected | One of the three TCC permissions missing | Click **Input Monitoring** in the menu → grant. Quit + reopen the app. For the venv, the grant goes to the **Python interpreter** instead. |
 | `Status: Error: see logs` after first Right Option press | Microphone not granted | macOS will prompt on first press; if you declined, open System Settings → Privacy & Security → Microphone and toggle dictate-mac on. |
 | Russian text doesn't appear in Citrix | Citrix unicode input disabled | In Citrix Viewer → Preferences → Keyboard, enable **Send Unicode keyboard input** (default in modern versions). Or use `--output=osascript`. |
+| Nothing is inserted in Citrix while *Instant paste* is selected | The remote session doesn't share the macOS clipboard | Switch the menu → *Text insertion method* → **Type keystrokes (for remote desktops)**. |
 | Status stuck on `Starting…` / `Downloading…` | Hugging Face unreachable (local mode), or the bundle can't find embedded Python | `curl -I https://huggingface.co/mlx-community/whisper-large-v3-turbo`. If the model is downloaded but loading still fails, rebuild with `./build.sh --clean`. |
 | `Model download failed — press Right Option to retry` | The first-run download failed (no network, DNS/VPN hiccup, HF outage) | Bring the network up and press **Right Option** — the warmup re-runs without an app restart. Check the log via **Open log file** if it keeps failing. |
 | `mlx` fails to install / load | Python 3.14 (no wheel) | Recreate venv: `uv venv --python 3.13 .venv --force && uv pip install -e .` |
@@ -682,6 +717,11 @@ revoke `com.local.dictate-mac` in
   grant.
 - Citrix Viewer requires **Send Unicode keyboard input** to be
   enabled (default in modern versions).
+- *Instant paste (Cmd+V)* temporarily overwrites the clipboard; the
+  previous contents are restored ~0.25 s after the paste, but only
+  *string* content is preserved — images/files copied earlier are
+  lost. It also does not reach remote-desktop sessions (Citrix, RDP,
+  VNC) without a shared clipboard — keep *Type keystrokes* for those.
 - The app is launched manually in v1 — no LaunchAgent, no
   auto-start at login.
 - The `.app` is unsigned, ad-hoc, not notarised. macOS Gatekeeper

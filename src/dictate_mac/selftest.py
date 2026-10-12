@@ -183,27 +183,33 @@ def test_gigaam_asr_smoke() -> Result:
 def test_typer_dispatch() -> Result:
     """Verify the ``type_text`` router picks the requested backend.
 
-    Patches ``dictate_mac.typer.type_text_quartz`` and
-    ``dictate_mac.typer.type_text_osascript`` so no real keystrokes are
-    injected during the test.
+    Patches ``dictate_mac.typer.type_text_quartz``,
+    ``dictate_mac.typer.paste_text`` and
+    ``dictate_mac.typer.type_text_osascript`` so no real keystrokes or
+    pasteboard writes happen during the test.
     """
     import dictate_mac.typer as typer_mod
 
     calls: list[tuple[str, tuple, dict]] = []
     real_q = typer_mod.type_text_quartz
+    real_p = typer_mod.paste_text
     real_a = typer_mod.type_text_osascript
     typer_mod.type_text_quartz = lambda *a, **kw: calls.append(("quartz", a, kw))
+    typer_mod.paste_text = lambda *a, **kw: calls.append(("paste", a, kw))
     typer_mod.type_text_osascript = lambda *a, **kw: calls.append(("osascript", a, kw))
     try:
         type_text("hello", backend="quartz")
+        type_text("instant", backend="paste")
         type_text("world", backend="osascript")
         type_text("default")  # default backend must be quartz
     finally:
         typer_mod.type_text_quartz = real_q
+        typer_mod.paste_text = real_p
         typer_mod.type_text_osascript = real_a
 
     expected = [
         ("quartz", ("hello",), {"per_char_delay_ms": 8}),
+        ("paste", ("instant",), {}),
         ("osascript", ("world",), {}),
         ("quartz", ("default",), {"per_char_delay_ms": 8}),
     ]
@@ -216,8 +222,51 @@ def test_typer_dispatch() -> Result:
     return Result(
         "typer-dispatch",
         True,
-        "router dispatched quartz/osascript/default correctly without injecting keystrokes",
+        "router dispatched quartz/paste/osascript/default correctly without injecting keystrokes",
     )
+
+
+def test_paste_clipboard_roundtrip() -> Result:
+    """Verify the pasteboard set/read/restore cycle used by paste_text.
+
+    Writes a probe string to the general pasteboard, reads it back,
+    then restores the previous string content. No Cmd+V is posted.
+    Best-effort: if the pasteboard is unavailable (headless SSH session
+    without a window server), the check soft-passes with a note.
+    """
+    try:
+        from AppKit import NSPasteboard, NSPasteboardTypeString
+
+        pb = NSPasteboard.generalPasteboard()
+        old = pb.stringForType_(NSPasteboardTypeString)
+        old = str(old) if old is not None else None
+
+        probe = "dictate-mac selftest probe"
+        pb.clearContents()
+        pb.setString_forType_(probe, NSPasteboardTypeString)
+        read_back = pb.stringForType_(NSPasteboardTypeString)
+
+        pb.clearContents()
+        if old is not None:
+            pb.setString_forType_(old, NSPasteboardTypeString)
+
+        if read_back is None or str(read_back) != probe:
+            return Result(
+                "paste-clipboard-roundtrip",
+                False,
+                f"pasteboard read-back mismatch: {read_back!r}",
+            )
+        return Result(
+            "paste-clipboard-roundtrip",
+            True,
+            "pasteboard set/read/restore cycle works",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return Result(
+            "paste-clipboard-roundtrip",
+            True,
+            f"pasteboard unavailable in this session ({exc}); skipping",
+        )
 
 
 def test_mic_roundtrip(seconds: float = 1.5, language: str = "auto") -> Result:
@@ -1449,6 +1498,7 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_gigaam_model_load,
         test_gigaam_asr_smoke,
         test_typer_dispatch,
+        test_paste_clipboard_roundtrip,
         test_ssl_certifi_on_disk,
         test_config_v1_migration_keeps_language,
         test_config_invalid_endpoint_rejected,

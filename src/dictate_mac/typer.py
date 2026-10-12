@@ -1,14 +1,21 @@
-"""Quartz Unicode keystroke injector for dictate-mac.
+"""Keystroke / paste injectors for dictate-mac.
 
-Types text into the focused window via raw CGEvent.
+Backends:
 
-Why raw CGEvent and not pynput:
+* ``quartz`` (default) — types character-by-character via raw CGEvent
+  Unicode events. The canonical path for Unicode typing (same code
+  path the OS uses for dead-keys, IME input) with predictable
+  forwarding through remote-desktop channels (Citrix ICA, RDP, VNC)
+  where the clipboard is not shared.
+* ``paste`` — instant insertion via the clipboard + a simulated Cmd+V.
+  Fast for long texts in ordinary apps, at the cost of temporarily
+  overwriting the clipboard.
+* ``osascript`` — System Events fallback.
+
+Why raw CGEvent and not pynput for the quartz backend:
 
 * Direct call to ``CGEventKeyboardSetUnicodeString`` is the canonical
-  macOS path for Unicode typing — it is the same code path the OS uses
-  for dead-keys, IME input, etc.
-* Predictable forwarding through the Citrix ICA channel when "Send
-  Unicode keyboard input" is enabled.
+  macOS path for Unicode typing.
 * ``pynput.keyboard.Controller.type`` does roughly the same thing
   through Cocoa but adds an opaque layer that has been reported to drop
   Cyrillic characters in some configurations.
@@ -25,7 +32,10 @@ logger = logging.getLogger("dictate_mac.typer")
 
 DEFAULT_PER_CHAR_DELAY_MS = 8
 RETURN_KEYCODE = 36  # kVK_Return on macOS
+PASTE_KEYCODE = 9  # kVK_ANSI_V on macOS
 UNICODE_CHUNK = 20  # characters per CGEventKeyboardSetUnicodeString call
+PASTE_SETTLE_S = 0.15  # pause between setting the clipboard and Cmd+V
+PASTE_RESTORE_DELAY_S = 0.25  # pause before restoring the old clipboard
 
 
 def _post_unicode(chars: str) -> None:
@@ -91,6 +101,65 @@ def type_text_quartz(
         time.sleep(delay)
 
 
+def _post_cmd_v() -> None:
+    from Quartz import (
+        CGEventCreateKeyboardEvent,
+        CGEventPost,
+        CGEventSetFlags,
+        kCGEventFlagMaskCommand,
+        kCGHIDEventTap,
+    )
+
+    down = CGEventCreateKeyboardEvent(None, PASTE_KEYCODE, True)
+    up = CGEventCreateKeyboardEvent(None, PASTE_KEYCODE, False)
+    CGEventSetFlags(down, kCGEventFlagMaskCommand)
+    CGEventSetFlags(up, kCGEventFlagMaskCommand)
+    CGEventPost(kCGHIDEventTap, down)
+    CGEventPost(kCGHIDEventTap, up)
+
+
+def paste_text(
+    text: str,
+    restore_delay_s: float = PASTE_RESTORE_DELAY_S,
+) -> None:
+    """Instant insertion: clipboard + simulated Cmd+V.
+
+    Puts ``text`` on the general pasteboard, posts Cmd+V into the
+    focused window, then restores the previous clipboard contents after
+    a short delay (the receiving app reads the pasteboard
+    asynchronously, so restoring immediately would race it).
+
+    Known limitations: the clipboard is temporarily overwritten, and
+    only *string* clipboard content is preserved across the paste —
+    images/files previously on the pasteboard are lost. Remote-desktop
+    sessions (Citrix, RDP, VNC) that don't share the macOS clipboard
+    won't receive anything; use the quartz backend there.
+    """
+    if not text:
+        return
+    logger.info("pasting %d chars via clipboard + Cmd+V", len(text))
+
+    try:
+        from AppKit import NSPasteboard, NSPasteboardTypeString
+
+        pb = NSPasteboard.generalPasteboard()
+        old = pb.stringForType_(NSPasteboardTypeString)
+        old = str(old) if old is not None else None
+
+        pb.clearContents()
+        pb.setString_forType_(text, NSPasteboardTypeString)
+
+        time.sleep(PASTE_SETTLE_S)
+        _post_cmd_v()
+
+        time.sleep(restore_delay_s)
+        pb.clearContents()
+        if old is not None:
+            pb.setString_forType_(old, NSPasteboardTypeString)
+    except Exception:  # noqa: BLE001
+        logger.exception("paste_text failed")
+
+
 def type_text_osascript(text: str) -> None:
     """Fallback typer using AppleScript / System Events.
 
@@ -124,6 +193,9 @@ def type_text(
     per_char_delay_ms: int = DEFAULT_PER_CHAR_DELAY_MS,
 ) -> None:
     """Dispatch to the selected backend."""
+    if backend == "paste":
+        paste_text(text)
+        return
     if backend == "osascript":
         type_text_osascript(text)
         return
