@@ -49,6 +49,7 @@ from dictate_mac.audio import SAMPLE_RATE, Recorder, trim_silence
 from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
+    MODEL_KIND_GIGAAM_V3_E2E_RNNT,
     MODEL_KIND_LOCAL,
     MODEL_KIND_PODLODKA_FP16,
     MODEL_KIND_PODLODKA_Q8,
@@ -269,6 +270,12 @@ class DictationMachine:
         if is_model_cached(kind):
             await self._publish_state(
                 State.LOADING_MODEL, "[warmup] loading model from cache"
+            )
+        elif kind == MODEL_KIND_GIGAAM_V3_E2E_RNNT:
+            await self._publish_state(
+                State.DOWNLOADING_MODEL,
+                "[warmup] downloading istupakov/gigaam-v3-onnx "
+                "(first run; ~226 MB + VAD)",
             )
         elif kind == MODEL_KIND_GIGAAM:
             await self._publish_state(

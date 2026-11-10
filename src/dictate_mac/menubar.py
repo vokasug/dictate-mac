@@ -109,6 +109,7 @@ from dictate_mac import config as config_mod
 from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
+    MODEL_KIND_GIGAAM_V3_E2E_RNNT,
     MODEL_KIND_LOCAL,
     MODEL_KIND_PODLODKA_FP16,
     MODEL_KIND_PODLODKA_Q8,
@@ -117,7 +118,12 @@ from dictate_mac.config import (
     normalize_endpoint,
 )
 from dictate_mac.state import DictationMachine, Settings, State
-from dictate_mac.transcriber import GIGAAM_REPO, MODEL_REPO, PODLODKA_REPO
+from dictate_mac.transcriber import (
+    GIGAAM_REPO,
+    GIGAAM_V3_REPO,
+    MODEL_REPO,
+    PODLODKA_REPO,
+)
 
 logger = logging.getLogger("dictate_mac.menubar")
 
@@ -191,6 +197,10 @@ _DOWNLOAD_LABELS: dict[str, tuple[str, str]] = {
         "Downloading GigaAM model…",
         "Loading GigaAM into RAM…",
     ),
+    MODEL_KIND_GIGAAM_V3_E2E_RNNT: (
+        "Downloading GigaAM v3 RNNT model…",
+        "Loading GigaAM v3 RNNT into RAM…",
+    ),
 }
 
 
@@ -242,9 +252,9 @@ class MenubarApp(rumps.App):
             self._lang_parent.add(item)
 
         # ---- model submenu -------------------------------------------
-        # Disabled header + five clickable rows: the stock local
+        # Disabled header + six clickable rows: the stock local
         # mlx-whisper row, the two Whisper-Podlodka-Turbo variant rows
-        # (fp16 / q8), a local GigaAM row — all switching back without
+        # (fp16 / q8), two local GigaAM rows — all switching back without
         # prompting — and an API row that opens the credentials dialog
         # (see model_settings_dialog.py). The API row's title carries
         # the active endpoint host so the user knows where audio will
@@ -274,6 +284,10 @@ class MenubarApp(rumps.App):
         self._model_gigaam_item = rumps.MenuItem(
             self._format_model_gigaam_title(settings.model_kind),
             callback=self._make_model_callback(MODEL_KIND_GIGAAM),
+        )
+        self._model_gigaam_v3_item = rumps.MenuItem(
+            self._format_model_gigaam_v3_title(settings.model_kind),
+            callback=self._make_model_callback(MODEL_KIND_GIGAAM_V3_E2E_RNNT),
         )
         self._model_api_item = rumps.MenuItem(
             self._format_model_api_title(settings.api_endpoint, settings.model_kind),
@@ -357,6 +371,7 @@ class MenubarApp(rumps.App):
             self._model_podlodka_fp16_item,
             self._model_podlodka_q8_item,
             self._model_gigaam_item,
+            self._model_gigaam_v3_item,
             self._model_api_item,
             None,  # separator
             self._lang_parent,
@@ -634,7 +649,10 @@ class MenubarApp(rumps.App):
 
     def _lang_parent_title(self) -> str:
         base = self._format_lang_parent_title(self._settings.language)
-        if self._settings.model_kind == MODEL_KIND_GIGAAM:
+        if self._settings.model_kind in (
+            MODEL_KIND_GIGAAM,
+            MODEL_KIND_GIGAAM_V3_E2E_RNNT,
+        ):
             return f"{base} (N/A for GigaAM)"
         return base
 
@@ -645,7 +663,10 @@ class MenubarApp(rumps.App):
         submenu is disabled while ``model_kind == "gigaam"``; whisper
         and API modes re-enable it. Idempotent.
         """
-        enabled = self._settings.model_kind != MODEL_KIND_GIGAAM
+        enabled = self._settings.model_kind not in (
+            MODEL_KIND_GIGAAM,
+            MODEL_KIND_GIGAAM_V3_E2E_RNNT,
+        )
         try:
             self._lang_parent._menuitem.setEnabled_(enabled)
         except Exception:  # noqa: BLE001
@@ -677,6 +698,15 @@ class MenubarApp(rumps.App):
     def _format_model_gigaam_title(active_kind: str) -> str:
         prefix = CHECK_GLYPH if active_kind == MODEL_KIND_GIGAAM else "  "
         return f"{prefix}Local GigaAM ({GIGAAM_REPO})"
+
+    @staticmethod
+    def _format_model_gigaam_v3_title(active_kind: str) -> str:
+        prefix = (
+            CHECK_GLYPH
+            if active_kind == MODEL_KIND_GIGAAM_V3_E2E_RNNT
+            else "  "
+        )
+        return f"{prefix}Local GigaAM v3 E2E RNNT INT8 ({GIGAAM_V3_REPO})"
 
     @staticmethod
     def _format_model_api_title(endpoint: str, active_kind: str) -> str:
@@ -930,6 +960,11 @@ class MenubarApp(rumps.App):
         new_gigaam = self._format_model_gigaam_title(self._settings.model_kind)
         if self._model_gigaam_item.title != new_gigaam:
             self._model_gigaam_item.title = new_gigaam
+        new_gigaam_v3 = self._format_model_gigaam_v3_title(
+            self._settings.model_kind
+        )
+        if self._model_gigaam_v3_item.title != new_gigaam_v3:
+            self._model_gigaam_v3_item.title = new_gigaam_v3
         new_api = self._format_model_api_title(
             self._settings.api_endpoint, self._settings.model_kind
         )

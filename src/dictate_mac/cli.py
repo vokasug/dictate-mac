@@ -27,6 +27,7 @@ from dictate_mac.config import (
     MODEL_KINDS,
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
+    MODEL_KIND_GIGAAM_V3_E2E_RNNT,
     MODEL_KIND_LOCAL,
     normalize_endpoint,
 )
@@ -93,7 +94,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Whisper-Podlodka-Turbo fine-tune (ru/en with punctuation) "
             "in-process at the given quantization. 'gigaam' runs the "
             "GigaAM multilingual CTC model in-process (ru/en/kk/ky/uz; "
-            "ignores --language). 'api' POSTs 16 kHz mono WAVs to a "
+            "ignores --language). 'gigaam_v3_e2e_rnnt' runs GigaAM v3 "
+            "E2E RNNT INT8 with punctuation (ignores --language). "
+            "'api' POSTs 16 kHz mono WAVs to a "
             "OpenAI-compatible endpoint; requires --api-endpoint, "
             "--api-key and --model-id. The CLI does NOT verify the "
             "endpoint at startup — failures surface in the log on "
@@ -217,6 +220,16 @@ def _download_model(model_kind: str = MODEL_KIND_LOCAL) -> None:
     ids, revisions and allow-patterns live in exactly one place.
     """
     from dictate_mac import transcriber
+
+    if model_kind == MODEL_KIND_GIGAAM_V3_E2E_RNNT:
+        logger.info(
+            "downloading %s (revision %s) + Silero VAD …",
+            transcriber.GIGAAM_V3_REPO,
+            transcriber.GIGAAM_V3_REVISION,
+        )
+        transcriber._download_gigaam_v3()
+        logger.info("download complete")
+        return
 
     if model_kind == MODEL_KIND_GIGAAM:
         repo_id, revision = transcriber._gigaam_repo_revision()

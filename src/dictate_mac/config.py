@@ -19,7 +19,8 @@ v1 (legacy) — recognised for read but never written by the current code:
 
 v2 (current) — produced on every save:
 
-    ``{"_v": 2, "language": ..., "model_kind": "local|api",
+    ``{"_v": 2, "language": ..., "model_kind": "local|podlodka_fp16|
+       podlodka_q8|gigaam|gigaam_v3_e2e_rnnt|api",
        "api_endpoint": ..., "api_key": ..., "api_model_id": ...,
        "output_backend": "quartz|paste|osascript",
        "paste_restore_clipboard": true|false}``
@@ -72,12 +73,14 @@ MODEL_KIND_LOCAL = "local"
 MODEL_KIND_PODLODKA_FP16 = "podlodka_fp16"
 MODEL_KIND_PODLODKA_Q8 = "podlodka_q8"
 MODEL_KIND_GIGAAM = "gigaam"
+MODEL_KIND_GIGAAM_V3_E2E_RNNT = "gigaam_v3_e2e_rnnt"
 MODEL_KIND_API = "api"
 MODEL_KINDS = (
     MODEL_KIND_LOCAL,
     MODEL_KIND_PODLODKA_FP16,
     MODEL_KIND_PODLODKA_Q8,
     MODEL_KIND_GIGAAM,
+    MODEL_KIND_GIGAAM_V3_E2E_RNNT,
     MODEL_KIND_API,
 )
 

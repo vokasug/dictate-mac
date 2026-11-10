@@ -1,6 +1,6 @@
 """ASR backends for dictate-mac.
 
-Three paths produce text from a mono 16 kHz float32 buffer:
+Four paths produce text from a mono 16 kHz float32 buffer:
 
 * ``_transcribe_local`` runs ``mlx-community/whisper-large-v3-turbo``
   in-process via ``mlx_whisper.transcribe``. The model is loaded once
@@ -23,11 +23,14 @@ Three paths produce text from a mono 16 kHz float32 buffer:
   dedicated MLX thread, resident in RAM, ``mx.clear_cache`` after
   each transcription. The model is a fixed multilingual CTC — it
   has no language parameter, so ``language`` is ignored on this path.
+* ``_transcribe_gigaam_v3`` runs the INT8 ONNX conversion of GigaAM v3
+  E2E RNNT through ``onnx-asr`` on CPU, with Silero VAD segmentation
+  for long-form audio. Output includes punctuation and normalization.
 * ``_transcribe_api`` POSTs a 16 kHz mono WAV to an
   OpenAI-compatible ``/v1/audio/transcriptions`` endpoint, passing the
   model id and bearer token the user configured in the menu bar.
 
-The public :func:`transcribe` picks one of the three based on
+The public :func:`transcribe` picks one of the four based on
 ``model_kind``; existing call sites that pass only ``(audio, language=)``
 keep working unchanged because the API path parameters default to
 disabled.
@@ -63,6 +66,7 @@ from dictate_mac.audio import SAMPLE_RATE as _ASR_SAMPLE_RATE
 from dictate_mac.config import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
+    MODEL_KIND_GIGAAM_V3_E2E_RNNT,
     MODEL_KIND_LOCAL,
     MODEL_KIND_PODLODKA_FP16,
     MODEL_KIND_PODLODKA_Q8,
@@ -181,6 +185,20 @@ WHISPER_INITIAL_PROMPTS = {
 GIGAAM_VARIANT = "fp16"
 GIGAAM_REPO = "ai-babai/gigaam-multilingual-mlx"
 
+GIGAAM_V3_REPO = "istupakov/gigaam-v3-onnx"
+GIGAAM_V3_REVISION = "322c3b29492673eb7d0b434bfa9dfb8653e34d02"
+GIGAAM_V3_FILES = (
+    "config.json",
+    "v3_e2e_rnnt_encoder.int8.onnx",
+    "v3_e2e_rnnt_decoder.int8.onnx",
+    "v3_e2e_rnnt_joint.int8.onnx",
+    "v3_e2e_rnnt_vocab.txt",
+    "LICENSE.txt",
+)
+GIGAAM_V3_VAD_REPO = "istupakov/silero-vad-onnx"
+GIGAAM_V3_VAD_REVISION = "b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6"
+GIGAAM_V3_VAD_FILES = ("config.json", "silero_vad.onnx")
+
 # Long-buffer decoding window for the GigaAM path. The conformer is
 # trained on ~20 s utterances; feeding a multi-minute buffer in one
 # shot degrades recognition progressively with position (rotary
@@ -207,6 +225,10 @@ _podlodka_path_cache: dict[str, str] = {}
 _gigaam_model = None
 _gigaam_lock = threading.Lock()
 _gigaam_first_call_done = False
+
+_gigaam_v3_model = None
+_gigaam_v3_lock = threading.Lock()
+_gigaam_v3_first_call_done = False
 
 _warmup_thread: Optional[threading.Thread] = None
 _warmup_lock = threading.Lock()
@@ -240,7 +262,14 @@ def _do_warmup_blocking() -> None:
     """Run the actual download + load. Runs on the background thread."""
     kind = _warmup_kind
     try:
-        if kind == MODEL_KIND_GIGAAM:
+        if kind == MODEL_KIND_GIGAAM_V3_E2E_RNNT:
+            if not _gigaam_v3_model_cached():
+                _emit("downloading", GIGAAM_V3_REPO)
+                logger.info("downloading %s (INT8) …", GIGAAM_V3_REPO)
+                _download_gigaam_v3()
+            _emit("loading", "")
+            _load_gigaam_v3()
+        elif kind == MODEL_KIND_GIGAAM:
             if not _gigaam_model_cached():
                 _emit("downloading", GIGAAM_REPO)
                 logger.info("downloading %s (%s) …", GIGAAM_REPO, GIGAAM_VARIANT)
@@ -351,6 +380,8 @@ def _local_model_path(model_kind: str = MODEL_KIND_LOCAL) -> str:
 
 def is_model_cached(model_kind: str = MODEL_KIND_LOCAL) -> bool:
     """True if the given local model is already in the HF cache."""
+    if model_kind == MODEL_KIND_GIGAAM_V3_E2E_RNNT:
+        return _gigaam_v3_model_cached()
     if model_kind == MODEL_KIND_GIGAAM:
         return _gigaam_model_cached()
     if model_kind in PODLODKA_VARIANTS:
@@ -427,6 +458,38 @@ def _download_gigaam() -> None:
         revision=revision,
         allow_patterns=["config.json", "manifest.json", "model.safetensors"],
     )
+
+
+def _gigaam_v3_paths(*, local_files_only: bool) -> tuple[str, str]:
+    from huggingface_hub import snapshot_download
+
+    asr_path = snapshot_download(
+        repo_id=GIGAAM_V3_REPO,
+        revision=GIGAAM_V3_REVISION,
+        allow_patterns=list(GIGAAM_V3_FILES),
+        local_files_only=local_files_only,
+    )
+    vad_path = snapshot_download(
+        repo_id=GIGAAM_V3_VAD_REPO,
+        revision=GIGAAM_V3_VAD_REVISION,
+        allow_patterns=list(GIGAAM_V3_VAD_FILES),
+        local_files_only=local_files_only,
+    )
+    return asr_path, vad_path
+
+
+def _gigaam_v3_model_cached() -> bool:
+    try:
+        asr_path, vad_path = _gigaam_v3_paths(local_files_only=True)
+    except Exception:  # noqa: BLE001
+        return False
+    return all((Path(asr_path) / name).is_file() for name in GIGAAM_V3_FILES) and all(
+        (Path(vad_path) / name).is_file() for name in GIGAAM_V3_VAD_FILES
+    )
+
+
+def _download_gigaam_v3() -> None:
+    _gigaam_v3_paths(local_files_only=False)
 
 
 def _release_whisper_slot() -> None:
@@ -550,8 +613,40 @@ def _load_gigaam():
         return _gigaam_model
 
 
+def _load_gigaam_v3():
+    global _gigaam_v3_model
+    if _gigaam_v3_model is not None:
+        return _gigaam_v3_model
+    with _gigaam_v3_lock:
+        if _gigaam_v3_model is not None:
+            return _gigaam_v3_model
+        t0 = time.perf_counter()
+        if not _gigaam_v3_model_cached():
+            _download_gigaam_v3()
+        asr_path, vad_path = _gigaam_v3_paths(local_files_only=True)
+
+        import onnx_asr
+
+        providers = ["CPUExecutionProvider"]
+        logger.info("loading GigaAM v3 E2E RNNT INT8 …")
+        asr = onnx_asr.load_model(
+            "gigaam-v3-e2e-rnnt",
+            asr_path,
+            quantization="int8",
+            providers=providers,
+        )
+        vad = onnx_asr.load_vad("silero", vad_path, providers=providers)
+        _gigaam_v3_model = asr.with_vad(vad)
+        dt = time.perf_counter() - t0
+        logger.info("gigaam v3 model loaded in %.1fs (will stay in RAM)", dt)
+        return _gigaam_v3_model
+
+
 def warm(model_kind: str = MODEL_KIND_LOCAL) -> None:
     """Force-load a local model (used by ``dictate-mac warmup``)."""
+    if model_kind == MODEL_KIND_GIGAAM_V3_E2E_RNNT:
+        _load_gigaam_v3()
+        return
     if model_kind == MODEL_KIND_GIGAAM:
         _run_on_mlx_thread(_load_gigaam)
         return
@@ -564,6 +659,10 @@ def model_loaded() -> bool:
 
 def gigaam_loaded() -> bool:
     return _gigaam_model is not None
+
+
+def gigaam_v3_loaded() -> bool:
+    return _gigaam_v3_model is not None
 
 
 def _audio_to_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
@@ -951,6 +1050,29 @@ def _transcribe_gigaam_mlx(audio: np.ndarray) -> str:
     return text
 
 
+def _transcribe_gigaam_v3(audio: np.ndarray) -> str:
+    global _gigaam_v3_first_call_done
+    if audio is None or audio.size == 0:
+        return ""
+    model = _load_gigaam_v3()
+    waveform = np.ascontiguousarray(audio, dtype=np.float32)
+
+    t0 = time.perf_counter()
+    segments = model.recognize(waveform, sample_rate=_ASR_SAMPLE_RATE)
+    text = " ".join(
+        segment_text
+        for segment in segments
+        if (segment_text := segment.text.strip())
+    )
+    dt = time.perf_counter() - t0
+    if not _gigaam_v3_first_call_done:
+        _gigaam_v3_first_call_done = True
+        logger.info("first gigaam v3 recognition done in %.2fs — model warm in RAM", dt)
+    else:
+        logger.info("gigaam v3 recognition done in %.2fs (%d chars)", dt, len(text))
+    return text
+
+
 def transcribe(
     audio: np.ndarray,
     language: str = "auto",
@@ -963,8 +1085,9 @@ def transcribe(
 ) -> str:
     """Run ASR on a mono 16 kHz float32 buffer; return plain text.
 
-    Dispatches to :func:`_transcribe_local`, :func:`_transcribe_gigaam`
-    or :func:`_transcribe_api` based on ``model_kind``. Both the stock
+    Dispatches to :func:`_transcribe_local`, :func:`_transcribe_gigaam`,
+    :func:`_transcribe_gigaam_v3` or :func:`_transcribe_api` based on
+    ``model_kind``. Both the stock
     whisper repo and the Podlodka variants route through
     :func:`_transcribe_local`, which selects the weights directory by
     kind. Callers passing only ``(audio, language=)`` keep the
@@ -984,6 +1107,8 @@ def transcribe(
             language=language,
             timeout=api_timeout,
         )
+    if model_kind == MODEL_KIND_GIGAAM_V3_E2E_RNNT:
+        return _transcribe_gigaam_v3(audio)
     if model_kind == MODEL_KIND_GIGAAM:
         return _transcribe_gigaam(audio)
     return _transcribe_local(audio, language, model_kind)

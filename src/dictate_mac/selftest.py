@@ -32,6 +32,7 @@ from dictate_mac.audio import SAMPLE_RATE, Recorder, trim_silence
 from dictate_mac.transcriber import (
     MODEL_KIND_API,
     MODEL_KIND_GIGAAM,
+    MODEL_KIND_GIGAAM_V3_E2E_RNNT,
     MODEL_KIND_LOCAL,
     MODEL_KIND_PODLODKA_FP16,
     MODEL_KIND_PODLODKA_Q8,
@@ -39,6 +40,7 @@ from dictate_mac.transcriber import (
     _transcribe_api,
     check_api_model_available,
     gigaam_loaded,
+    gigaam_v3_loaded,
     model_loaded,
     transcribe,
     warm,
@@ -178,6 +180,16 @@ def test_gigaam_model_load() -> Result:
 
 def test_gigaam_asr_smoke() -> Result:
     return _check_asr_smoke("gigaam-asr-smoke", MODEL_KIND_GIGAAM)
+
+
+def test_gigaam_v3_model_load() -> Result:
+    return _check_model_load(
+        "gigaam-v3-model-load", MODEL_KIND_GIGAAM_V3_E2E_RNNT, gigaam_v3_loaded
+    )
+
+
+def test_gigaam_v3_asr_smoke() -> Result:
+    return _check_asr_smoke("gigaam-v3-asr-smoke", MODEL_KIND_GIGAAM_V3_E2E_RNNT)
 
 
 def test_typer_dispatch() -> Result:
@@ -482,6 +494,7 @@ def test_config_local_kinds_valid() -> Result:
 
     kinds = (
         config_mod.MODEL_KIND_GIGAAM,
+        config_mod.MODEL_KIND_GIGAAM_V3_E2E_RNNT,
         config_mod.MODEL_KIND_PODLODKA_FP16,
         config_mod.MODEL_KIND_PODLODKA_Q8,
     )
@@ -516,8 +529,8 @@ def test_config_local_kinds_valid() -> Result:
     return Result(
         "config-local-kinds",
         True,
-        "gigaam/podlodka_fp16/podlodka_q8 valid without API fields; "
-        "roundtrip preserves them",
+        "gigaam/gigaam_v3_e2e_rnnt/podlodka_fp16/podlodka_q8 valid "
+        "without API fields; roundtrip preserves them",
     )
 
 
@@ -934,6 +947,125 @@ def test_gigaam_dispatch() -> Result:
         "gigaam-dispatch",
         True,
         "model_kind='gigaam' routes to GigaAM; default still routes to whisper",
+    )
+
+
+def test_gigaam_v3_dispatch() -> Result:
+    import dictate_mac.transcriber as t
+
+    calls: dict = {}
+
+    def fake_v3(audio: np.ndarray) -> str:
+        calls["v3"] = audio.size
+        return "v3-text"
+
+    def fake_local(audio: np.ndarray, language: str, model_kind: str) -> str:
+        calls["local"] = model_kind
+        return "local-text"
+
+    real_v3, real_local = t._transcribe_gigaam_v3, t._transcribe_local
+    try:
+        t._transcribe_gigaam_v3 = fake_v3
+        t._transcribe_local = fake_local
+        audio = _synth_speech_like(seconds_total=1.0, speech_seconds=0.5)
+        out = t.transcribe(
+            audio, language="ru", model_kind=t.MODEL_KIND_GIGAAM_V3_E2E_RNNT
+        )
+    finally:
+        t._transcribe_gigaam_v3, t._transcribe_local = real_v3, real_local
+
+    if out != "v3-text" or calls.get("v3") != audio.size or "local" in calls:
+        return Result(
+            "gigaam-v3-dispatch",
+            False,
+            f"routing wrong: out={out!r} calls={calls}",
+        )
+    return Result(
+        "gigaam-v3-dispatch", True, "RNNT kind bypasses the Whisper and CTC paths"
+    )
+
+
+def test_gigaam_v3_load_contract() -> Result:
+    from unittest import mock
+
+    import onnx_asr
+
+    import dictate_mac.transcriber as t
+
+    asr = mock.Mock()
+    segmented = mock.Mock()
+    asr.with_vad.return_value = segmented
+    vad = mock.Mock()
+    with (
+        mock.patch.object(t, "_gigaam_v3_model", None),
+        mock.patch.object(t, "_gigaam_v3_model_cached", return_value=True),
+        mock.patch.object(
+            t, "_gigaam_v3_paths", return_value=("/pinned-asr", "/pinned-vad")
+        ) as paths,
+        mock.patch.object(onnx_asr, "load_model", return_value=asr) as load_model,
+        mock.patch.object(onnx_asr, "load_vad", return_value=vad) as load_vad,
+    ):
+        loaded = t._load_gigaam_v3()
+
+    if loaded is not segmented:
+        return Result("gigaam-v3-load-contract", False, "VAD adapter was not returned")
+    paths.assert_called_once_with(local_files_only=True)
+    load_model.assert_called_once_with(
+        "gigaam-v3-e2e-rnnt",
+        "/pinned-asr",
+        quantization="int8",
+        providers=["CPUExecutionProvider"],
+    )
+    load_vad.assert_called_once_with(
+        "silero", "/pinned-vad", providers=["CPUExecutionProvider"]
+    )
+    asr.with_vad.assert_called_once_with(vad)
+    return Result(
+        "gigaam-v3-load-contract",
+        True,
+        "pinned local snapshots + INT8 + CPU providers + Silero VAD",
+    )
+
+
+def test_gigaam_v3_longform_adapter() -> Result:
+    from types import SimpleNamespace
+    from unittest import mock
+
+    import dictate_mac.transcriber as t
+
+    captured: dict = {}
+
+    class FakeAdapter:
+        def recognize(self, audio: np.ndarray, *, sample_rate: int):
+            captured["samples"] = audio.size
+            captured["dtype"] = audio.dtype
+            captured["sample_rate"] = sample_rate
+            return iter(
+                (
+                    SimpleNamespace(text=" Привет,"),
+                    SimpleNamespace(text="мир! "),
+                    SimpleNamespace(text=" "),
+                )
+            )
+
+    with mock.patch.object(t, "_load_gigaam_v3", return_value=FakeAdapter()):
+        audio = np.zeros(45 * SAMPLE_RATE, dtype=np.float32)
+        out = t._transcribe_gigaam_v3(audio)
+
+    if out != "Привет, мир!" or captured != {
+        "samples": 45 * SAMPLE_RATE,
+        "dtype": np.dtype(np.float32),
+        "sample_rate": SAMPLE_RATE,
+    }:
+        return Result(
+            "gigaam-v3-longform-adapter",
+            False,
+            f"out={out!r} captured={captured}",
+        )
+    return Result(
+        "gigaam-v3-longform-adapter",
+        True,
+        "45 s NumPy buffer goes through VAD adapter; segments join cleanly",
     )
 
 
@@ -1497,6 +1629,8 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         lambda: test_asr_smoke(language=language),
         test_gigaam_model_load,
         test_gigaam_asr_smoke,
+        test_gigaam_v3_model_load,
+        test_gigaam_v3_asr_smoke,
         test_typer_dispatch,
         test_paste_clipboard_roundtrip,
         test_ssl_certifi_on_disk,
@@ -1510,6 +1644,9 @@ def run_all(*, with_mic: bool = True, language: str = "auto") -> List[Result]:
         test_api_transcribe_omits_language_when_auto,
         test_models_endpoint_check_accepts_and_rejects,
         test_gigaam_dispatch,
+        test_gigaam_v3_dispatch,
+        test_gigaam_v3_load_contract,
+        test_gigaam_v3_longform_adapter,
         test_whisper_decode_options,
         test_gigaam_chunking,
         test_podlodka_dispatch,

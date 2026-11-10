@@ -1,6 +1,6 @@
 # dictate-mac 🎙️
 
-Voice dictation for macOS with **five ASR backends** selectable at runtime:
+Voice dictation for macOS with **six ASR backends** selectable at runtime:
 
 - **Local Whisper** — `mlx-community/whisper-large-v3-turbo` runs
   in-process via MLX on Apple Silicon (~1.8 GB RAM, works fully
@@ -15,6 +15,9 @@ Voice dictation for macOS with **five ASR backends** selectable at runtime:
   multilingual CTC model running in-process via MLX (~1.4 GB RAM,
   fully offline, Russian / English / Kazakh / Kyrgyz / Uzbek
   auto-detected).
+- **Local GigaAM v3 E2E RNNT INT8** — an ONNX conversion of
+  `ai-sage/GigaAM-v3` (`e2e_rnnt`) running in-process on CPU (~0.9 GB
+  RAM, fully offline after download, punctuation and text normalization).
 - **API** — any OpenAI-compatible `/v1/audio/transcriptions` endpoint
   (your gateway, a hosted service, …). No ASR model loaded; only audio
   is uploaded per recording.
@@ -27,8 +30,8 @@ clipboard + simulated Cmd+V) is selectable in the menu for everyday
 apps where speed matters more than remote-desktop compatibility.
 
 - 100 ISO-639-1 languages + `Auto-detect` — applies to the Whisper,
-  Podlodka and API backends (GigaAM detects its five languages on its
-  own, so the language menu is disabled while it is active)
+  Podlodka and API backends. The language menu is disabled for both
+  GigaAM backends because they have no language parameter.
 - Settings (including API credentials) persist at
   `~/.config/dictate-mac/config.json` with mode `0o600`; the API key
   is never logged
@@ -64,10 +67,11 @@ To *run* dictate-mac:
 - **macOS 13 Ventura** or newer
 - **8 GB RAM** or more
 - Any working microphone (the built-in one is fine)
-- ~284 MB for the `.app` itself, plus an optional download for the
+- ~291 MB for the `.app` itself, plus an optional download for the
   selected local backend's weights (~1.5 GB Whisper, ~1.5 GB Podlodka
-  fp16, ~0.8 GB Podlodka q8, or ~1.2 GB GigaAM; downloaded on first
-  launch of the matching local mode; **API** mode needs no extra disk)
+  fp16, ~0.8 GB Podlodka q8, ~1.2 GB GigaAM, or ~226 MB GigaAM v3 RNNT
+  plus a small VAD; downloaded on first launch of the matching local
+  mode; **API** mode needs no extra disk)
 - Internet access only for the first local-model download — API mode
   needs none
 
@@ -87,14 +91,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.9.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.9.0-macos.zip)
+[`DictateMac-v0.10.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.10.0-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
-Compressed download is ~93 MB; the extracted `.app` is ~284 MB.
+Compressed download is ~97 MB; the extracted `.app` is ~291 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.9.0-macos.zip
+shasum -a 256 DictateMac-v0.10.0-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -103,7 +107,7 @@ shasum -a 256 DictateMac-v0.9.0-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.9.0-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.10.0-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -141,6 +145,10 @@ plus English / Kazakh / Kyrgyz / Uzbek), click the menu icon →
 **Model (changing will restart app)** → **Local GigaAM**. The app
 restarts and downloads the ~1.2 GB weights on first use.
 
+For GigaAM v3 with punctuation, capitalization and text normalization,
+choose **Local GigaAM v3 E2E RNNT INT8**. The app downloads approximately
+226 MB of weights plus a small VAD and runs them locally on CPU.
+
 To use an external service instead:
 
 1. Click the menu icon → **Model (changing will restart app)** →
@@ -160,9 +168,8 @@ for full details on validation, error messages, and the config file.
 Click the menu bar icon → **Recognition language** → *Auto-detect*
 or any of the 100 ISO-639-1 codes. The choice persists and applies
 to the next recording — no model reload. The API backend also
-forwards it per request (see [API](#api)). In **GigaAM** mode this
-menu is disabled —
-the model auto-detects its five supported languages on its own.
+forwards it per request (see [API](#api)). This menu is disabled in
+both **GigaAM** modes because neither model accepts a language argument.
 
 ### 6. Use
 
@@ -212,9 +219,9 @@ open dist/DictateMac.app
 ```
 
 `./build.sh` regenerates the `.icns` icon and runs `py2app.build_app`.
-The result is fully self-contained — everything except the ~1.5 GB
-local Whisper weights (downloaded at first launch) is bundled.
-**Bundle size: ~284 MB.** Dev-side details (stubs, post-build strip
+The result is fully self-contained — everything except the selected
+local ASR weights (downloaded at first launch) is bundled.
+**Bundle size: ~291 MB.** Dev-side details (stubs, post-build strip
 pass, install_name / signature rewrites) are documented inline in
 `setup.py` and `build.sh`.
 
@@ -273,6 +280,7 @@ Model (changing will restart app)
   Local Whisper Podlodka fp16 (evilfreelancer/whisper-podlodka-turbo-MLX)
   Local Whisper Podlodka q8 (evilfreelancer/whisper-podlodka-turbo-MLX)
   Local GigaAM (ai-babai/gigaam-multilingual-mlx)
+  Local GigaAM v3 E2E RNNT INT8 (istupakov/gigaam-v3-onnx)
   API (https://<your-host>/v1)
 ─────────────────
 Recognition language: Auto-detect
@@ -302,6 +310,7 @@ Quit
 | `Local Whisper Podlodka fp16 (...)` | Clickable. Switches to the Whisper-Podlodka-Turbo fine-tune (ru/en with punctuation) at full fp16 precision and restarts the daemon. |
 | `Local Whisper Podlodka q8 (...)` | Clickable. Same model at 8-bit quantization — about half the RAM of fp16 with near-identical quality. |
 | `Local GigaAM (...)`       | Clickable. Switches to the local GigaAM multilingual CTC backend and restarts the daemon. The Recognition-language menu is disabled while this backend is active (the model has no language parameter). |
+| `Local GigaAM v3 E2E RNNT INT8 (...)` | Clickable. Switches to the local GigaAM v3 RNNT ONNX backend with punctuation and normalization, then restarts the daemon. The Recognition-language menu is disabled. |
 | `API (<endpoint>)`         | Clickable. Opens the API credentials dialog (Endpoint / API key / Model ID). On a successful OK the dialog GETs `<endpoint>/models` to verify the endpoint + model id, persists the values, switches the active backend to API, and restarts the daemon. |
 | `Recognition language: <X>`| Clickable. Opens a submenu of `Auto-detect` and the 100 ISO-639-1 languages Whisper supports. Selecting one persists the choice and applies to the next recording (no restart). |
 | `Text insertion method`    | Disabled, descriptive header.                        |
@@ -322,15 +331,16 @@ Quit
 
 - `Starting…` — process launched, running import-time setup.
 - `Downloading whisper model…` / `Downloading Podlodka fp16 model…` /
-  `Downloading Podlodka q8 model…` / `Downloading GigaAM model…` —
-  first-run HF download of the active local backend (skipped in
-  API mode and on subsequent launches).
+  `Downloading Podlodka q8 model…` / `Downloading GigaAM model…` /
+  `Downloading GigaAM v3 RNNT model…` — first-run HF download of the
+  active local backend (skipped in API mode and on subsequent launches).
 - `Loading whisper into RAM…` / `Loading Podlodka fp16 into RAM…` /
-  `Loading Podlodka q8 into RAM…` / `Loading GigaAM into RAM…` —
-  model weights are being loaded (~30–60 s cold, ~2 s from cache).
-  Skipped in API mode.
-- `Ready` — Right Option is armed. silero-vad is NOT pre-loaded here
-  — it warms up lazily on the first recording.
+  `Loading Podlodka q8 into RAM…` / `Loading GigaAM into RAM…` /
+  `Loading GigaAM v3 RNNT into RAM…` — model weights are being loaded
+  (~30–60 s cold, ~2 s from cache). Skipped in API mode.
+- `Ready` — Right Option is armed. The audio-trimming silero-vad is
+  NOT pre-loaded here — it warms up lazily on the first recording.
+  GigaAM v3's separate segmentation VAD loads with its ASR model.
 - `Recording…` — recording is in progress.
 - `Transcribing…` — ASR backend is running on the captured clip.
 - `Typing…` — recognised text is being injected keystroke by
@@ -343,15 +353,15 @@ Quit
 
 ## Recognition language
 
-The fourth row of the menu (`Recognition language: <X>`) opens a
+The `Recognition language: <X>` row of the menu opens a
 submenu of choices. The currently-selected option is prefixed with a
 checkmark (`✓`); clicking another entry makes that the new default.
 The choice is persisted between launches — no restart, no model
 reload. For the API backend the choice is also forwarded on every
-request (see [API](#api)). The menu is disabled while the **GigaAM**
-backend is active: GigaAM is a fixed multilingual CTC model
-(Russian / English / Kazakh / Kyrgyz / Uzbek) with no language
-parameter — it detects the language from the audio itself.
+request (see [API](#api)). The menu is disabled for both **GigaAM**
+backends because neither accepts a language parameter. The multilingual
+CTC model detects Russian / English / Kazakh / Kyrgyz / Uzbek itself;
+GigaAM v3 E2E RNNT is primarily a Russian model with English support.
 
 The submenu lists `Auto-detect` first, then the 100 ISO-639-1
 languages Whisper supports, sorted alphabetically by their English
@@ -435,6 +445,25 @@ in the **Transcribing** step.
 - **Restart on switch:** same as Whisper — a menu click restarts
   the daemon.
 
+### Local GigaAM v3 E2E RNNT INT8
+
+- **What it does:** runs `gigaam-v3-e2e-rnnt` through `onnx-asr`
+  using the pinned INT8 conversion at `istupakov/gigaam-v3-onnx`,
+  derived from `ai-sage/GigaAM-v3` revision `e2e_rnnt`. Inference uses
+  ONNX Runtime's CPU provider; PyTorch and Transformers are not needed.
+- **Cost:** approximately 0.8–0.9 GB RAM after warmup on Apple Silicon.
+- **Disk:** approximately 226 MB of ASR weights plus Silero VAD,
+  downloaded to `~/.cache/huggingface/hub/`. Both repository revisions
+  are pinned for reproducible offline inference.
+- **Network:** none after the first complete ASR + VAD download.
+- **Languages:** primarily Russian, with English support; there is no
+  language selector, so the Recognition-language menu is disabled.
+- **Output:** punctuation, capitalization and text normalization are
+  produced directly by the end-to-end model.
+- **Long dictations:** the bundled Silero VAD segments audio into chunks
+  of at most 20 seconds and the resulting texts are joined in order.
+- **Restart on switch:** same as the other local backends.
+
 ### API
 
 - **What it does:** POSTs 16 kHz mono WAV to
@@ -515,9 +544,10 @@ Schema v2 contents look like:
 
 - `_v` is the schema version (currently `2`).
 - `language` is either an ISO-639-1 code (`"ru"`, `"en"`, …) or the
-  sentinel `"auto"`. Ignored while `model_kind` is `"gigaam"`.
+  sentinel `"auto"`. Ignored for `"gigaam"` and
+  `"gigaam_v3_e2e_rnnt"`.
 - `model_kind` is `"local"` (default, Whisper), `"podlodka_fp16"`,
-  `"podlodka_q8"`, `"gigaam"`, or `"api"`.
+  `"podlodka_q8"`, `"gigaam"`, `"gigaam_v3_e2e_rnnt"`, or `"api"`.
 - The remaining three fields are only meaningful with
   `model_kind=api`.
 - `output_backend` is `"quartz"` (default, character-by-character
@@ -557,14 +587,14 @@ binary and the source venv:
 Common flags (before or after the subcommand): `--quiet`,
 `--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}`,
 `--output {quartz,paste,osascript}`, `--language {auto|<iso-639-1>}`,
-`--model-kind {local,podlodka_fp16,podlodka_q8,gigaam,api}`,
+`--model-kind {local,podlodka_fp16,podlodka_q8,gigaam,gigaam_v3_e2e_rnnt,api}`,
 `--api-endpoint <url>`, `--api-key <key>`, `--model-id <id>`. The
 last three are meaningful only with `--model-kind=api`; `daemon`
 refuses to start without the three required values when `api` is
-selected. `--language` is ignored with `--model-kind=gigaam` (the
-model auto-detects its five languages). CLI runs do not read or write
-the persisted config file — language and ASR settings are taken from
-flags directly.
+selected. `--language` is ignored with `--model-kind=gigaam` and
+`--model-kind=gigaam_v3_e2e_rnnt`. CLI runs do not read or write the
+persisted config file — language and ASR settings are taken from flags
+directly.
 
 Examples:
 
@@ -574,6 +604,9 @@ dictate-mac daemon --language=ru
 
 # Local GigaAM backend (Russian auto-detected by the model):
 dictate-mac daemon --model-kind=gigaam
+
+# Local GigaAM v3 RNNT with punctuation and normalization:
+dictate-mac daemon --model-kind=gigaam_v3_e2e_rnnt
 
 # Podlodka fine-tune at 8-bit quantization, Russian:
 dictate-mac daemon --model-kind=podlodka_q8 --language=ru
@@ -594,6 +627,9 @@ dictate-mac daemon --output=paste
 
 # Pre-download the GigaAM weights without starting the daemon:
 dictate-mac warmup --model-kind=gigaam --skip-mic-test
+
+# Pre-download GigaAM v3 RNNT and its segmentation VAD:
+dictate-mac warmup --model-kind=gigaam_v3_e2e_rnnt --skip-mic-test
 
 # Pre-download the Podlodka q8 weights without starting the daemon:
 dictate-mac warmup --model-kind=podlodka_q8 --skip-mic-test
@@ -634,8 +670,10 @@ Ready` only appears after that completes. In **API** mode the
 local-model load is skipped, `Ready` arrives within a second, and each
 recording is POSTed to the configured gateway. silero-vad's ONNX model
 loads lazily on the first recording. Whisper recognitions take ~3 s on
-M1; GigaAM is typically faster on its five supported languages; API
-mode takes only the gateway round-trip (typically 0.3–1 s).
+M1; GigaAM CTC is typically faster on its five supported languages;
+GigaAM v3 RNNT runs on CPU and uses additional VAD segmentation for
+long recordings; API mode takes only the gateway round-trip (typically
+0.3–1 s).
 
 The rationale behind each of these choices is documented inline in
 the source modules (see [Development](#development)).
@@ -656,13 +694,16 @@ Exit code 0 if all checks pass, 1 otherwise. Each check prints a
 PASS/FAIL line with a one-line detail; the checks are
 `model-load`, `vad-silence`, `vad-speech-like`, `vad-pause-clamp`,
 `asr-smoke`,
-`gigaam-model-load`, `gigaam-asr-smoke`, `typer-dispatch`,
+  `gigaam-model-load`, `gigaam-asr-smoke`, `gigaam-v3-model-load`,
+  `gigaam-v3-asr-smoke`, `typer-dispatch`,
 `paste-clipboard-roundtrip`,
 `ssl-certifi`, `config-v1-migration`, `config-invalid-endpoint`,
 `config-api-required-when-api`, `config-local-kinds`,
 `audio-wav-roundtrip`, `last-recording-wav`, `api-transcribe-headers`,
-`api-transcribe-auto-language`, `api-models-check`, `gigaam-dispatch`,
-`whisper-decode-options`, `gigaam-chunking`, `podlodka-dispatch`,
+  `api-transcribe-auto-language`, `api-models-check`, `gigaam-dispatch`,
+  `gigaam-v3-dispatch`, `gigaam-v3-load-contract`,
+  `gigaam-v3-longform-adapter`, `whisper-decode-options`,
+  `gigaam-chunking`, `podlodka-dispatch`,
 `warmup-retry`, `error-marker`, `recorder-portaudio-retry`,
 `hotkey-escape-event`,
 `podlodka-fp16-model-load`, `podlodka-fp16-asr-smoke`,
@@ -681,7 +722,7 @@ plus an optional `mic-roundtrip`.
 | `Model download failed — press Right Option to retry` | The first-run download failed (no network, DNS/VPN hiccup, HF outage) | Bring the network up and press **Right Option** — the warmup re-runs without an app restart. Check the log via **Open log file** if it keeps failing. |
 | `mlx` fails to install / load | Python 3.14 (no wheel) | Recreate venv: `uv venv --python 3.13 .venv --force && uv pip install -e .` |
 | API mode returns HTTP 429 | The OpenAI-compatible gateway is rate-limiting | Some gateways (e.g. `whisper-large-v3-turbo`) have a 1-request-per-10-15-seconds cap on certain upstream providers. Switch the menu to a different model id, or to Local if the same model is acceptable. |
-| Too much RAM usage | A local backend occupies ~1.1–1.8 GB permanently | API mode doesn't load any ASR weights; Podlodka q8 is the lightest whisper-family option (~1.1 GB). Switch if RAM is tight. |
+| Too much RAM usage | A local backend occupies ~0.8–2.0 GB permanently | API mode doesn't load any ASR weights; GigaAM v3 RNNT INT8 uses about 0.8–0.9 GB, and Podlodka q8 is the lightest Whisper-family option (~1.1 GB). Switch if RAM is tight. |
 
 ## Uninstall & known limitations
 
@@ -696,6 +737,8 @@ rm -rf ~/Library/Logs/dictate-mac
 rm -rf ~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo
 rm -rf ~/.cache/huggingface/hub/models--evilfreelancer--whisper-podlodka-turbo-MLX
 rm -rf ~/.cache/huggingface/hub/models--ai-babai--gigaam-multilingual-mlx
+rm -rf ~/.cache/huggingface/hub/models--istupakov--gigaam-v3-onnx
+rm -rf ~/.cache/huggingface/hub/models--istupakov--silero-vad-onnx
 ```
 
 You can leave the granted Privacy & Security permissions in place —
@@ -707,14 +750,15 @@ revoke `com.local.dictate-mac` in
 
 - RAM is held permanently after the first startup **when using a
   local backend**: ~1.8–2.0 GB for Whisper, ~1.8 GB for Podlodka fp16,
-  ~1.1 GB for Podlodka q8, ~1.4 GB for GigaAM. The API backend
-  doesn't load any ASR weights into memory; its startup is
-  instantaneous and can run on Mac models where the mlx weights
-  aren't downloaded.
-- GigaAM emits lowercase text without punctuation (greedy CTC
-  decoding) and supports only Russian, English, Kazakh, Kyrgyz and
-  Uzbek — use Whisper, Podlodka or API for other languages or for
-  punctuation-rich output.
+  ~1.1 GB for Podlodka q8, ~1.4 GB for GigaAM CTC, and ~0.8–0.9 GB for
+  GigaAM v3 RNNT INT8. The API backend doesn't load any ASR weights
+  into memory; its startup is instantaneous and can run on Mac models
+  where the local weights aren't downloaded.
+- GigaAM multilingual CTC emits lowercase text without punctuation and
+  supports only Russian, English, Kazakh, Kyrgyz and Uzbek. GigaAM v3
+  E2E RNNT adds punctuation, capitalization and normalization but is
+  primarily intended for Russian with English support — use Whisper,
+  Podlodka or API for other languages.
 - The Podlodka fine-tune is strongest on Russian and English; on
   other languages stock Whisper (or the API backend) remains the
   better choice.
@@ -741,15 +785,15 @@ revoke `com.local.dictate-mac` in
   before launch. Grant it in System Settings → Privacy & Security →
   Input Monitoring, then Quit + reopen DictateMac.
 - Switching the ASR backend (**Local Whisper** ↔ **Local Whisper
-  Podlodka** ↔ **Local GigaAM** ↔ **API**) always triggers a restart.
-  The menu click is automatic.
+  Podlodka** ↔ **Local GigaAM** ↔ **Local GigaAM v3 RNNT** ↔ **API**)
+  always triggers a restart. The menu click is automatic.
 - Python 3.13.x only; 3.14 is unsupported because `mlx` does not yet
   ship a wheel for it.
 - The bundled `.app` cannot transcode audio files
   (`silero_vad.read_audio("foo.wav")` and `torchaudio.load()` both
   raise `RuntimeError`). All audio in the bundle flows through
-  PortAudio → `numpy.ndarray` → silero-vad → whisper — the only
-   path we use. Dev-side rationale and how the stubs work around the
+  PortAudio → `numpy.ndarray` → silero-vad → the selected local ASR
+  backend — the only path we use. Dev-side rationale and how the stubs work around the
   upstream torch / torchaudio wheels is documented inline in
   `setup.py`.
 

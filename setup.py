@@ -1,10 +1,10 @@
 """py2app setup script for dictate-mac.
 
 Builds ``dist/DictateMac.app`` — a macOS bundle that contains every
-Python dependency (mlx + mlx_whisper, silero_vad with its model, sounddevice,
-rumps, pyobjc frameworks) and starts ``dictate_mac.cli:main`` as the
-entry point. The whisper STT weights are NOT bundled; they download
-from Hugging Face on the first launch on a new Mac.
+Python dependency (mlx + mlx_whisper, onnx-asr, silero_vad with its model,
+sounddevice, rumps, pyobjc frameworks) and starts ``dictate_mac.cli:main``
+as the entry point. ASR weights are NOT bundled; they download from
+Hugging Face on the first launch on a new Mac.
 
 Run via ``./build.sh`` (handles ``.icns`` generation + python path).
 
@@ -372,6 +372,7 @@ def _extract_native_runtime_libs(app_dist: Path) -> None:
         # is at lib/python3.13/onnxruntime/.
         "onnxruntime/": "remove",
         "onnxruntime-": "remove",
+        "onnx_asr/": "remove",
         # certifi ships cacert.pem as a package data file. Inside the
         # zip, ``certifi.where()`` returns a path that does not exist
         # on the filesystem, so ``ssl.create_default_context(cafile=
@@ -909,8 +910,8 @@ def _strip_bundle_junk(app_dist: Path) -> None:
 
     The bundle is built around the strict subset of dependencies
     ``dictate_mac.audio`` actually invokes (numpy, sounddevice,
-    onnxruntime-backed silero_vad, mlx-whisper-on-mlx, huggingface_hub,
-    pyobjc-framework-{Quartz, Cocoa}, rumps). Anything else that
+    onnxruntime-backed silero_vad and onnx-asr, mlx-whisper-on-mlx,
+    huggingface_hub, pyobjc-framework-{Quartz, Cocoa}, rumps). Anything else that
     modulegraph pulled in via transitive imports is fair game.
 
     Targets removed (relative to ``Contents/Resources/lib/python3.13/``
@@ -1017,23 +1018,11 @@ def _strip_bundle_junk(app_dist: Path) -> None:
         # needed only for downstream C extensions building against
         # numpy. Our bundle has no such build step.
         ("numpy/_core/include", "numpy C headers (.h) for downstream"),
-        # numpy typing stubs (.pyi) — these are static type-hint stubs
-        # for downstream C extensions; they are consumed ONLY by
-        # static type-checkers (mypy, pyright), never by the runtime.
-        # Distributed across ``numpy/{typing,_typing,char,strings,
-        # core,rec,polynomial,ma,matrixlib,ctypeslib,linalg,fft,
-        # random,testing}/...pyi``. Strip each individually so the
-        # strip report shows the breakdown.
-        #
-        # Runtime notes (verified by deleting each dir from a copy
-        # of the bundle and running selftest):
-        # - ``numpy/_utils`` MUST stay (numpy._globals imports
-        #   ``set_module`` from it at import time).
-        # - ``numpy/_typing`` MUST stay (numpy.linalg imports it).
-        # - ``numpy/matrixlib`` MUST stay (loaded transitively by
-        #   numpy.lib via numpy.matrixlib.defmatrix).
-        # All other submodules below are strippable.
-        ("numpy/typing", "numpy.typing (1.0 MB .pyi stubs)"),
+        # Typing-related directories mix static .pyi stubs with runtime
+        # modules. Keep ``numpy/typing`` for onnx-asr and ``numpy/_typing``
+        # for numpy.linalg; strip only directories that selftest proves
+        # unreachable. ``numpy/_utils`` and ``numpy/matrixlib`` also stay
+        # for numpy._globals and numpy.lib respectively.
         ("numpy/strings", "numpy.strings (stubs)"),
         ("numpy/char", "numpy.char (legacy + stubs)"),
         ("numpy/core", "numpy.core (legacy compat shim + stubs)"),
@@ -1374,6 +1363,7 @@ def main() -> None:
             # this entry py2app misses the C extension binary in
             # python313.zip and the stub fails at first inference.
             "onnxruntime",
+            "onnx_asr",
             # certifi must be an on-disk package (with cacert.pem) —
             # ssl can only load CA bundles from the filesystem. See
             # the matching zip-removal in _extract_native_runtime_libs.
