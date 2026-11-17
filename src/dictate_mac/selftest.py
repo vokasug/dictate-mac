@@ -239,19 +239,33 @@ def test_typer_dispatch() -> Result:
 
 
 def test_paste_clipboard_roundtrip() -> Result:
-    """Verify the pasteboard set/read/restore cycle used by paste_text.
+    """Verify the full pasteboard snapshot/restore used by paste_text.
 
-    Writes a probe string to the general pasteboard, reads it back,
-    then restores the previous string content. No Cmd+V is posted.
-    Best-effort: if the pasteboard is unavailable (headless SSH session
-    without a window server), the check soft-passes with a note.
+    Uses a unique pasteboard, leaving the general clipboard untouched.
+    No Cmd+V is posted. Best-effort: if the pasteboard is unavailable
+    (headless SSH session without a window server), the check soft-passes.
     """
     try:
-        from AppKit import NSPasteboard, NSPasteboardTypeString
+        from AppKit import (
+            NSPasteboard,
+            NSPasteboardItem,
+            NSPasteboardTypePNG,
+            NSPasteboardTypeString,
+        )
+        from Foundation import NSData
 
-        pb = NSPasteboard.generalPasteboard()
-        old = pb.stringForType_(NSPasteboardTypeString)
-        old = str(old) if old is not None else None
+        from dictate_mac.typer import _snapshot_pasteboard
+
+        pb = NSPasteboard.pasteboardWithUniqueName()
+        png_payload = b"\x89PNG\r\n\x1a\ndictate-mac selftest"
+        png_data = NSData.dataWithBytes_length_(png_payload, len(png_payload))
+
+        image_item = NSPasteboardItem.alloc().init()
+        image_item.setData_forType_(png_data, NSPasteboardTypePNG)
+        text_item = NSPasteboardItem.alloc().init()
+        text_item.setString_forType_("original text", NSPasteboardTypeString)
+        pb.writeObjects_([image_item, text_item])
+        old = _snapshot_pasteboard(pb)
 
         probe = "dictate-mac selftest probe"
         pb.clearContents()
@@ -259,8 +273,8 @@ def test_paste_clipboard_roundtrip() -> Result:
         read_back = pb.stringForType_(NSPasteboardTypeString)
 
         pb.clearContents()
-        if old is not None:
-            pb.setString_forType_(old, NSPasteboardTypeString)
+        pb.writeObjects_(old)
+        restored = pb.pasteboardItems() or []
 
         if read_back is None or str(read_back) != probe:
             return Result(
@@ -268,10 +282,29 @@ def test_paste_clipboard_roundtrip() -> Result:
                 False,
                 f"pasteboard read-back mismatch: {read_back!r}",
             )
+        if len(restored) != 2:
+            return Result(
+                "paste-clipboard-roundtrip",
+                False,
+                f"expected 2 restored items, got {len(restored)}",
+            )
+        restored_png = restored[0].dataForType_(NSPasteboardTypePNG)
+        restored_text = restored[1].stringForType_(NSPasteboardTypeString)
+        if (
+            restored_png is None
+            or not restored_png.isEqualToData_(png_data)
+            or restored_text is None
+            or str(restored_text) != "original text"
+        ):
+            return Result(
+                "paste-clipboard-roundtrip",
+                False,
+                "image or text data mismatch after pasteboard restore",
+            )
         return Result(
             "paste-clipboard-roundtrip",
             True,
-            "pasteboard set/read/restore cycle works",
+            "text, image data, and multiple items survive snapshot/restore",
         )
     except Exception as exc:  # noqa: BLE001
         return Result(

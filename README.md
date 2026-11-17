@@ -91,14 +91,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.10.0-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.10.0-macos.zip)
+[`DictateMac-v0.10.1-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.10.1-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
 Compressed download is ~97 MB; the extracted `.app` is ~291 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.10.0-macos.zip
+shasum -a 256 DictateMac-v0.10.1-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -107,7 +107,7 @@ shasum -a 256 DictateMac-v0.10.0-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.10.0-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.10.1-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -262,9 +262,9 @@ pass, install_name / signature rewrites) are documented inline in
     length. Does **not** work in remote-desktop sessions without a
     shared clipboard. The companion toggle **Restore clipboard after
     paste** (on by default) returns the previous clipboard contents
-    ~0.25 s after the paste — only *string* content is preserved, so
-    images/files previously copied are lost. Turn the toggle off to
-    keep the transcript on the clipboard for manual re-pasting.
+    ~0.25 s after the paste, including text, images, files, and other
+    pasteboard representations. Turn the toggle off to keep the
+    transcript on the clipboard for manual re-pasting.
 
 ## The menu bar
 
@@ -771,11 +771,10 @@ revoke `com.local.dictate-mac` in
 - Citrix Viewer requires **Send Unicode keyboard input** to be
   enabled (default in modern versions).
 - *Instant paste (Cmd+V)* temporarily overwrites the clipboard. With
-  *Restore clipboard after paste* on (default), the previous contents
-  are restored ~0.25 s after the paste, but only *string* content is
-  preserved — images/files copied earlier are lost. It also does not
-  reach remote-desktop sessions (Citrix, RDP, VNC) without a shared
-  clipboard — keep *Type keystrokes* for those.
+  *Restore clipboard after paste* on (default), all previous pasteboard
+  items and representations are restored ~0.25 s after the paste. It
+  does not reach remote-desktop sessions (Citrix, RDP, VNC) without a
+  shared clipboard — keep *Type keystrokes* for those.
 - The app is launched manually in v1 — no LaunchAgent, no
   auto-start at login.
 - The `.app` is unsigned, ad-hoc, not notarised. macOS Gatekeeper

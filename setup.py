@@ -1232,6 +1232,10 @@ def _strip_bundle_junk(app_dist: Path) -> None:
                     (f"Resources __pycache__ ({pycache.relative_to(resources_dir)})", size)
                 )
 
+        site_pyo = lib_root / "site.pyo"
+        if site_pyo.is_symlink() and not site_pyo.exists():
+            site_pyo.unlink()
+
         resources_openssl = resources_dir / "openssl.ca"
         if resources_openssl.exists() and (
             resources_openssl.is_dir() or resources_openssl.is_file()

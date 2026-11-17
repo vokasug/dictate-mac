@@ -118,6 +118,20 @@ def _post_cmd_v() -> None:
     CGEventPost(kCGHIDEventTap, up)
 
 
+def _snapshot_pasteboard(pb) -> list:
+    from AppKit import NSPasteboardItem
+
+    snapshot = []
+    for source in pb.pasteboardItems() or []:
+        item = NSPasteboardItem.alloc().init()
+        for type_ in source.types():
+            data = source.dataForType_(type_)
+            if data is not None:
+                item.setData_forType_(data, type_)
+        snapshot.append(item)
+    return snapshot
+
+
 def paste_text(
     text: str,
     restore_delay_s: float = PASTE_RESTORE_DELAY_S,
@@ -132,11 +146,9 @@ def paste_text(
     would race it). With ``restore_clipboard=False`` the pasted text
     stays on the clipboard, so the user can paste it again by hand.
 
-    Known limitations: the clipboard is temporarily overwritten, and
-    only *string* clipboard content is preserved across the paste —
-    images/files previously on the pasteboard are lost. Remote-desktop
-    sessions (Citrix, RDP, VNC) that don't share the macOS clipboard
-    won't receive anything; use the quartz backend there.
+    Known limitation: the clipboard is temporarily overwritten.
+    Remote-desktop sessions (Citrix, RDP, VNC) that don't share the
+    macOS clipboard won't receive anything; use the quartz backend there.
     """
     if not text:
         return
@@ -150,24 +162,23 @@ def paste_text(
         from AppKit import NSPasteboard, NSPasteboardTypeString
 
         pb = NSPasteboard.generalPasteboard()
-        old = None
-        if restore_clipboard:
-            saved = pb.stringForType_(NSPasteboardTypeString)
-            old = str(saved) if saved is not None else None
-
-        pb.clearContents()
-        pb.setString_forType_(text, NSPasteboardTypeString)
-
-        time.sleep(PASTE_SETTLE_S)
-        _post_cmd_v()
-
-        if restore_clipboard:
-            # Give the receiving app time to read the pasteboard before
-            # we overwrite it with the restored content.
-            time.sleep(restore_delay_s)
+        old = _snapshot_pasteboard(pb) if restore_clipboard else []
+        try:
             pb.clearContents()
-            if old is not None:
-                pb.setString_forType_(old, NSPasteboardTypeString)
+            pb.setString_forType_(text, NSPasteboardTypeString)
+
+            time.sleep(PASTE_SETTLE_S)
+            _post_cmd_v()
+
+            if restore_clipboard:
+                # Give the receiving app time to read the pasteboard before
+                # we overwrite it with the restored content.
+                time.sleep(restore_delay_s)
+        finally:
+            if restore_clipboard:
+                pb.clearContents()
+                if old:
+                    pb.writeObjects_(old)
     except Exception:  # noqa: BLE001
         logger.exception("paste_text failed")
 
