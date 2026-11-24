@@ -195,9 +195,7 @@ GIGAAM_V3_FILES = (
     "v3_e2e_rnnt_vocab.txt",
     "LICENSE.txt",
 )
-GIGAAM_V3_VAD_REPO = "istupakov/silero-vad-onnx"
-GIGAAM_V3_VAD_REVISION = "b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6"
-GIGAAM_V3_VAD_FILES = ("config.json", "silero_vad.onnx")
+GIGAAM_V3_VAD_FILES = ("silero_vad.onnx",)
 
 # Long-buffer decoding window for the GigaAM path. The conformer is
 # trained on ~20 s utterances; feeding a multi-minute buffer in one
@@ -461,6 +459,8 @@ def _download_gigaam() -> None:
 
 
 def _gigaam_v3_paths(*, local_files_only: bool) -> tuple[str, str]:
+    from importlib import resources as impresources
+
     from huggingface_hub import snapshot_download
 
     asr_path = snapshot_download(
@@ -469,12 +469,10 @@ def _gigaam_v3_paths(*, local_files_only: bool) -> tuple[str, str]:
         allow_patterns=list(GIGAAM_V3_FILES),
         local_files_only=local_files_only,
     )
-    vad_path = snapshot_download(
-        repo_id=GIGAAM_V3_VAD_REPO,
-        revision=GIGAAM_V3_VAD_REVISION,
-        allow_patterns=list(GIGAAM_V3_VAD_FILES),
-        local_files_only=local_files_only,
-    )
+    # Use the same wheel-provided ONNX model as the shared recording trim.
+    # Besides avoiding a second download, this keeps both VAD passes on the
+    # same Silero version. py2app keeps this resource on disk in the bundle.
+    vad_path = str(impresources.files("silero_vad.data"))
     return asr_path, vad_path
 
 

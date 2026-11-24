@@ -14,7 +14,7 @@ dependencies = [
     "gigaam-multilingual-mlx>=0.2,<0.3",
     "huggingface_hub>=0.20",
     "sounddevice>=0.4.6",
-    "silero-vad>=5.1",
+    "silero-vad>=6.3,<6.4",
     "onnxruntime>=1.17",
     "onnx-asr[cpu]==0.12.0",
     "pyobjc-framework-Quartz>=10.2",

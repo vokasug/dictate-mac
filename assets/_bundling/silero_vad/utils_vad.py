@@ -1,10 +1,9 @@
 """Numpy + onnxruntime re-implementation of silero-vad's runtime path.
 
-Pure numpy throughout. We do not import ``torch`` or ``torchaudio`` —
-those modules are not present in the bundled DictateMac.app (the
-upstream wheel's top-level ``import torch`` / ``import torchaudio`` is
-the entire reason this stub exists; see ``setup.py
-``_install_silero_vad_stub``).
+Pure numpy throughout. We do not import ``torch`` or an audio-file I/O
+backend — neither is present in the bundled DictateMac.app. Avoiding
+the upstream wheel's torch dependency is the entire reason this stub
+exists; see ``setup.py`` ``_install_silero_vad_stub``.
 
 Public surface (re-)exported from ``silero_vad/__init__.py``:
 

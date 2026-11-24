@@ -677,109 +677,13 @@ def _strip_info_plist_paths(app_dist: Path) -> None:
         print(f"  WARNING: codesign re-sign failed: {stderr}")
 
 
-def _install_torchaudio_stub(app_dist: Path) -> None:
-    """Replace the bundled torchaudio package with a stub.
-
-    The real torchaudio wheel ships a C extension
-    (``_torchaudio.abi3.so``) whose ``libtorchaudio`` binary fails to
-    ``dlopen`` under our bundle — its ``install_name`` chain
-    references wheel dependencies that py2app doesn't bundle. We don't
-    actually need torchaudio at runtime: we feed raw ``numpy.ndarray``
-    from PortAudio into silero-vad, which only uses
-    ``torchaudio.read_audio`` / ``save_audio`` / ``transforms.Resample``
-    for *file* I/O that we never invoke. ``mlx_whisper`` doesn't
-    touch torchaudio at all.
-
-    Workaround: install a stub ``torchaudio`` package that exports
-    the attribute paths silero-vad looks up at module top-level,
-    with no-op fallbacks where possible.
-
-    Drop the stub directory if the user later needs torchaudio-backed
-    audio I/O in the bundle.
-    """
-    target_dir = (
-        app_dist
-        / "Contents/Resources/lib/python3.13/torchaudio"
-    )
-    # py2app wrote the real wheel here — wipe it.
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / "__init__.py").write_text(
-        '''"""Stub torchaudio for the bundled DictateMac.
-
-silero-vad imports ``torchaudio`` at module top-level but only uses
-parts of it (``read_audio``, ``save_audio``, ``transforms.Resample``)
-that we never call — silero-vad's VAD pipeline operates on raw
-``numpy.ndarray`` samples, not torchaudio tensors.
-
-The real torchaudio wheel ships a ``libtorchaudio`` binary whose
-``install_name`` chain references wheel dependencies that py2app
-doesn't bundle, so it fails to ``dlopen`` under our bundle. Rather
-than patch the wheel's C-level linking, we replace the torchaudio
-import with this stub. The stub exposes the attribute paths
-silero-vad and mlx_whisper look up, returning no-ops that keep them
-happy.
-
-If the user later needs torchaudio-backed audio I/O, drop this
-directory and let the real wheel take over.
-"""
-
-__version__ = "2.9.0+stub"
-
-
-class _NoOp:
-    """Stand-in callable/object that swallows every attribute access."""
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def __getattr__(self, name):
-        return _NoOp()
-
-    def __call__(self, *args, **kwargs):
-        return _NoOp()
-
-
-def load(*args, **kwargs):
-    raise RuntimeError(
-        "torchaudio is stubbed in this DictateMac.app — file/audio I/O "
-        "via torchaudio.load is not available. Use the venv-installed "
-        "build for full audio I/O."
-    )
-
-
-def save(*args, **kwargs):
-    raise RuntimeError("torchaudio is stubbed — see torchaudio.load docstring")
-
-
-def list_audio_backends(*args, **kwargs):
-    return ["stub"]
-
-
-sox_effects = _NoOp()
-transforms = _NoOp()
-compliance = _NoOp()
-datasets = _NoOp()
-models = _NoOp()
-pipelines = _NoOp()
-IOStream = _NoOp
-'''
-    )
-    print(
-        f"  installed torchaudio stub at {target_dir} "
-        "(silero-vad/mlx_whisper only — file I/O not supported)"
-    )
-
-
 def _install_silero_vad_stub(app_dist: Path) -> None:
     """Replace the bundled ``silero_vad`` package with a numpy+onnxruntime stub.
 
-    The upstream wheel's ``silero_vad.utils_vad`` has top-level
-    ``import torch`` and ``import torchaudio`` and ends up transitively
-    pulling ``libtorch_cpu.dylib`` (~263 MB on disk) into the bundle
-    even though dictation only invokes ``silero_vad.load_silero_vad``
-    (which defaults to ``onnx=False`` → the JIT path → ``torch.jit.load``).
+    The upstream wheel requires torch and defaults to the JIT model,
+    which ends up transitively pulling ``libtorch_cpu.dylib`` (~263 MB
+    on disk) into the bundle even though dictation only invokes
+    ``silero_vad.load_silero_vad()`` and ``get_speech_timestamps()``.
 
     We replace ``silero_vad/{__init__,utils_vad,model}.py`` with a pure
     numpy + onnxruntime implementation that targets the ONNX model
@@ -937,8 +841,9 @@ def _strip_bundle_junk(app_dist: Path) -> None:
 
     * Silero-vad model variants we don't use:
       ``silero_vad.jit``, ``silero_vad_16k.safetensors``,
-      ``silero_vad_16k_op15.onnx``, ``silero_vad_half.onnx``,
-      ``silero_vad_op18_ifless.onnx``. We keep ``silero_vad.onnx``.
+      ``silero_vad_16k_op15.onnx``, ``silero_vad_16k_sequence.onnx``,
+      ``silero_vad_half.onnx`` and ``silero_vad_op18_ifless.onnx``.
+      We keep ``silero_vad.onnx``.
 
     * Top-level duplicates of ``mlx.metallib``, ``libmlx.dylib`` and
       ``libjaccl.dylib`` that py2app's dylib scan also drops into
@@ -1125,6 +1030,7 @@ def _strip_bundle_junk(app_dist: Path) -> None:
         "silero_vad.jit",
         "silero_vad_16k.safetensors",
         "silero_vad_16k_op15.onnx",
+        "silero_vad_16k_sequence.onnx",
         "silero_vad_half.onnx",
         "silero_vad_op18_ifless.onnx",
     ]
@@ -1400,7 +1306,6 @@ def main() -> None:
             "pip",
             "wheel",
             "torch",
-            "torchaudio",
             "numba",
             "llvmlite",
             "sympy",
@@ -1442,7 +1347,6 @@ def main() -> None:
     app_dist = PROJECT_ROOT / "dist" / "DictateMac.app"
     if app_dist.exists():
         _extract_native_runtime_libs(app_dist)
-        _install_torchaudio_stub(app_dist)
         _install_silero_vad_stub(app_dist)
         _install_timing_stub(app_dist)
         _strip_bundle_junk(app_dist)

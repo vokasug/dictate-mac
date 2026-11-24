@@ -10,7 +10,7 @@
 #          (restored afterwards even on failure)
 #        - extract native libs (libportaudio, _sounddevice_data) out
 #          of python313.zip
-#        - install torchaudio / silero_vad / mlx_whisper.timing stubs
+#        - install silero_vad / mlx_whisper.timing stubs
 #          into the bundle
 #        - strip unused packages, .pyi stubs, __pycache__, metadata
 #        - rewrite __boot__.py to use RESOURCEPATH
@@ -51,6 +51,11 @@ if ! "$VENV_PY" -c "import py2app" >/dev/null 2>&1; then
             && "$VENV_PY" -m pip install 'py2app>=0.28'
     fi
 fi
+
+# uv's CPython builds zlib into the interpreter, so there is no extension
+# file for py2app 0.28 to copy (upstream issue #555).
+PY2APP_BUILD=$("$VENV_PY" -c 'import pathlib, py2app; print(pathlib.Path(py2app.__file__).with_name("build_app.py"))')
+sed -i '' 's/self.copy_file(zlib.__file__, os.path.dirname(arcdir))/hasattr(zlib, "__file__") and self.copy_file(zlib.__file__, os.path.dirname(arcdir))/' "$PY2APP_BUILD"
 
 # 2) .icns via assets/icon/make_icon.py.
 echo "== build.sh: (re)generating assets/DictateMac.icns"

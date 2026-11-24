@@ -67,11 +67,11 @@ To *run* dictate-mac:
 - **macOS 13 Ventura** or newer
 - **8 GB RAM** or more
 - Any working microphone (the built-in one is fine)
-- ~291 MB for the `.app` itself, plus an optional download for the
+- ~302 MB for the `.app` itself, plus an optional download for the
   selected local backend's weights (~1.5 GB Whisper, ~1.5 GB Podlodka
-  fp16, ~0.8 GB Podlodka q8, ~1.2 GB GigaAM, or ~226 MB GigaAM v3 RNNT
-  plus a small VAD; downloaded on first launch of the matching local
-  mode; **API** mode needs no extra disk)
+  fp16, ~0.8 GB Podlodka q8, ~1.2 GB GigaAM, or ~226 MB GigaAM v3 RNNT;
+  downloaded on first launch of the matching local mode; **API** mode
+  needs no extra disk)
 - Internet access only for the first local-model download — API mode
   needs none
 
@@ -91,14 +91,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.10.1-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.10.1-macos.zip)
+[`DictateMac-v0.10.2-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.10.2-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
-Compressed download is ~97 MB; the extracted `.app` is ~291 MB.
+Compressed download is ~104 MB; the extracted `.app` is ~302 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.10.1-macos.zip
+shasum -a 256 DictateMac-v0.10.2-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -107,7 +107,7 @@ shasum -a 256 DictateMac-v0.10.1-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.10.1-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.10.2-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -147,7 +147,8 @@ restarts and downloads the ~1.2 GB weights on first use.
 
 For GigaAM v3 with punctuation, capitalization and text normalization,
 choose **Local GigaAM v3 E2E RNNT INT8**. The app downloads approximately
-226 MB of weights plus a small VAD and runs them locally on CPU.
+226 MB of ASR weights and runs them locally on CPU. Its segmentation VAD
+is included in the app.
 
 To use an external service instead:
 
@@ -221,7 +222,7 @@ open dist/DictateMac.app
 `./build.sh` regenerates the `.icns` icon and runs `py2app.build_app`.
 The result is fully self-contained — everything except the selected
 local ASR weights (downloaded at first launch) is bundled.
-**Bundle size: ~291 MB.** Dev-side details (stubs, post-build strip
+**Bundle size: ~302 MB with uv CPython 3.13.** Dev-side details (stubs, post-build strip
 pass, install_name / signature rewrites) are documented inline in
 `setup.py` and `build.sh`.
 
@@ -452,10 +453,10 @@ in the **Transcribing** step.
   derived from `ai-sage/GigaAM-v3` revision `e2e_rnnt`. Inference uses
   ONNX Runtime's CPU provider; PyTorch and Transformers are not needed.
 - **Cost:** approximately 0.8–0.9 GB RAM after warmup on Apple Silicon.
-- **Disk:** approximately 226 MB of ASR weights plus Silero VAD,
-  downloaded to `~/.cache/huggingface/hub/`. Both repository revisions
-  are pinned for reproducible offline inference.
-- **Network:** none after the first complete ASR + VAD download.
+- **Disk:** approximately 226 MB of ASR weights downloaded to
+  `~/.cache/huggingface/hub/` at a pinned revision. Silero VAD is reused
+  from the bundled `silero-vad` package, so it needs no separate download.
+- **Network:** none after the first complete ASR download.
 - **Languages:** primarily Russian, with English support; there is no
   language selector, so the Recognition-language menu is disabled.
 - **Output:** punctuation, capitalization and text normalization are
@@ -628,7 +629,7 @@ dictate-mac daemon --output=paste
 # Pre-download the GigaAM weights without starting the daemon:
 dictate-mac warmup --model-kind=gigaam --skip-mic-test
 
-# Pre-download GigaAM v3 RNNT and its segmentation VAD:
+# Pre-download GigaAM v3 RNNT (its segmentation VAD is already bundled):
 dictate-mac warmup --model-kind=gigaam_v3_e2e_rnnt --skip-mic-test
 
 # Pre-download the Podlodka q8 weights without starting the daemon:
@@ -668,8 +669,8 @@ In a **local** mode the daemon downloads the model weights (if not
 cached) and loads them into RAM before arming the hotkey — `Status:
 Ready` only appears after that completes. In **API** mode the
 local-model load is skipped, `Ready` arrives within a second, and each
-recording is POSTed to the configured gateway. silero-vad's ONNX model
-loads lazily on the first recording. Whisper recognitions take ~3 s on
+recording is POSTed to the configured gateway. silero-vad loads lazily
+on the first recording. Whisper recognitions take ~3 s on
 M1; GigaAM CTC is typically faster on its five supported languages;
 GigaAM v3 RNNT runs on CPU and uses additional VAD segmentation for
 long recordings; API mode takes only the gateway round-trip (typically
@@ -789,12 +790,10 @@ revoke `com.local.dictate-mac` in
 - Python 3.13.x only; 3.14 is unsupported because `mlx` does not yet
   ship a wheel for it.
 - The bundled `.app` cannot transcode audio files
-  (`silero_vad.read_audio("foo.wav")` and `torchaudio.load()` both
-  raise `RuntimeError`). All audio in the bundle flows through
-  PortAudio → `numpy.ndarray` → silero-vad → the selected local ASR
-  backend — the only path we use. Dev-side rationale and how the stubs work around the
-  upstream torch / torchaudio wheels is documented inline in
-  `setup.py`.
+  (`silero_vad.read_audio("foo.wav")` raises `RuntimeError`). All audio
+  in the bundle flows through PortAudio → `numpy.ndarray` → silero-vad →
+  the selected local ASR backend — the only path we use. The NumPy/ONNX
+  shim that avoids bundling torch is documented inline in `setup.py`.
 
 ---
 

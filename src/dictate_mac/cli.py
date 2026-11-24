@@ -223,7 +223,7 @@ def _download_model(model_kind: str = MODEL_KIND_LOCAL) -> None:
 
     if model_kind == MODEL_KIND_GIGAAM_V3_E2E_RNNT:
         logger.info(
-            "downloading %s (revision %s) + Silero VAD …",
+            "downloading %s (revision %s) …",
             transcriber.GIGAAM_V3_REPO,
             transcriber.GIGAAM_V3_REVISION,
         )

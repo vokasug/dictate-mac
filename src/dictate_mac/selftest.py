@@ -1019,6 +1019,7 @@ def test_gigaam_v3_dispatch() -> Result:
 
 
 def test_gigaam_v3_load_contract() -> Result:
+    from importlib import resources as impresources
     from unittest import mock
 
     import onnx_asr
@@ -1029,12 +1030,13 @@ def test_gigaam_v3_load_contract() -> Result:
     segmented = mock.Mock()
     asr.with_vad.return_value = segmented
     vad = mock.Mock()
+    vad_path = str(impresources.files("silero_vad.data"))
     with (
         mock.patch.object(t, "_gigaam_v3_model", None),
         mock.patch.object(t, "_gigaam_v3_model_cached", return_value=True),
-        mock.patch.object(
-            t, "_gigaam_v3_paths", return_value=("/pinned-asr", "/pinned-vad")
-        ) as paths,
+        mock.patch(
+            "huggingface_hub.snapshot_download", return_value="/pinned-asr"
+        ) as snapshot_download,
         mock.patch.object(onnx_asr, "load_model", return_value=asr) as load_model,
         mock.patch.object(onnx_asr, "load_vad", return_value=vad) as load_vad,
     ):
@@ -1042,7 +1044,12 @@ def test_gigaam_v3_load_contract() -> Result:
 
     if loaded is not segmented:
         return Result("gigaam-v3-load-contract", False, "VAD adapter was not returned")
-    paths.assert_called_once_with(local_files_only=True)
+    snapshot_download.assert_called_once_with(
+        repo_id=t.GIGAAM_V3_REPO,
+        revision=t.GIGAAM_V3_REVISION,
+        allow_patterns=list(t.GIGAAM_V3_FILES),
+        local_files_only=True,
+    )
     load_model.assert_called_once_with(
         "gigaam-v3-e2e-rnnt",
         "/pinned-asr",
@@ -1050,13 +1057,13 @@ def test_gigaam_v3_load_contract() -> Result:
         providers=["CPUExecutionProvider"],
     )
     load_vad.assert_called_once_with(
-        "silero", "/pinned-vad", providers=["CPUExecutionProvider"]
+        "silero", vad_path, providers=["CPUExecutionProvider"]
     )
     asr.with_vad.assert_called_once_with(vad)
     return Result(
         "gigaam-v3-load-contract",
         True,
-        "pinned local snapshots + INT8 + CPU providers + Silero VAD",
+        "pinned ASR snapshot + wheel Silero VAD + INT8 + CPU providers",
     )
 
 

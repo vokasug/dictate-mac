@@ -141,7 +141,7 @@ _vad_lock = threading.Lock()
 
 
 def _get_vad_model():
-    """Lazy singleton — the silero-vad ONNX session is loaded once."""
+    """Lazy singleton — the silero-vad model is loaded once."""
     global _vad_model
     if _vad_model is None:
         with _vad_lock:
