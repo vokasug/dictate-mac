@@ -91,14 +91,14 @@ GitHub release, copy it into `/Applications`, and open it.
 
 ### 1. Download
 
-[`DictateMac-v0.10.2-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.10.2-macos.zip)
+[`DictateMac-v0.10.3-macos.zip`](https://github.com/vokasug/dictate-mac/releases/latest/download/DictateMac-v0.10.3-macos.zip)
 from the [latest release](https://github.com/vokasug/dictate-mac/releases/latest).
 Compressed download is ~104 MB; the extracted `.app` is ~302 MB.
 
 Verify the download with the bundled `.sha256`:
 
 ```bash
-shasum -a 256 DictateMac-v0.10.2-macos.zip
+shasum -a 256 DictateMac-v0.10.3-macos.zip
 # compare with the contents of the .sha256 file from the same release
 ```
 
@@ -107,7 +107,7 @@ shasum -a 256 DictateMac-v0.10.2-macos.zip
 Double-click the zip in Finder, or from a terminal:
 
 ```bash
-open DictateMac-v0.10.2-macos.zip   # expands to ./DictateMac.app
+open DictateMac-v0.10.3-macos.zip   # expands to ./DictateMac.app
 mv DictateMac.app /Applications/   # optional — keeps the .app
                                   # alongside your other apps
 open /Applications/DictateMac.app
@@ -462,7 +462,9 @@ in the **Transcribing** step.
 - **Output:** punctuation, capitalization and text normalization are
   produced directly by the end-to-end model.
 - **Long dictations:** the bundled Silero VAD segments audio into chunks
-  of at most 20 seconds and the resulting texts are joined in order.
+  of at most 30 seconds and the resulting texts are joined in order.
+  Pauses preserved by the recording trim stay in one recognition context;
+  200 ms of speech padding protects phrase onsets and punctuation.
 - **Restart on switch:** same as the other local backends.
 
 ### API

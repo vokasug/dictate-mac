@@ -1059,11 +1059,16 @@ def test_gigaam_v3_load_contract() -> Result:
     load_vad.assert_called_once_with(
         "silero", vad_path, providers=["CPUExecutionProvider"]
     )
-    asr.with_vad.assert_called_once_with(vad)
+    asr.with_vad.assert_called_once_with(
+        vad,
+        min_silence_duration_ms=700,
+        max_speech_duration_s=30,
+        speech_pad_ms=200,
+    )
     return Result(
         "gigaam-v3-load-contract",
         True,
-        "pinned ASR snapshot + wheel Silero VAD + INT8 + CPU providers",
+        "pinned ASR + Silero VAD (700 ms split, 30 s max, 200 ms pad)",
     )
 
 

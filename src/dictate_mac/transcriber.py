@@ -634,7 +634,17 @@ def _load_gigaam_v3():
             providers=providers,
         )
         vad = onnx_asr.load_vad("silero", vad_path, providers=providers)
-        _gigaam_v3_model = asr.with_vad(vad)
+        # The shared recording trim keeps internal pauses at 600 ms. The
+        # default 100 ms VAD split would decode each such pause as a new
+        # utterance, producing false sentence breaks and losing 5.3-style
+        # numbers. Keep those pauses in one ASR context and retain enough
+        # lead-in audio for clean onsets and punctuation.
+        _gigaam_v3_model = asr.with_vad(
+            vad,
+            min_silence_duration_ms=700,
+            max_speech_duration_s=30,
+            speech_pad_ms=200,
+        )
         dt = time.perf_counter() - t0
         logger.info("gigaam v3 model loaded in %.1fs (will stay in RAM)", dt)
         return _gigaam_v3_model
